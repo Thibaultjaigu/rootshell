@@ -356,6 +356,10 @@ final class VNCPaneView: SplitPaneView, ObservableObject {
         connectIfNeeded()
     }
 
+    override var keyboardAccessoryFrameInScreen: CGRect? {
+        keyboardCoordinator?.keyboardAccessoryFrameInScreen
+    }
+
     /// Bottom inset the keyboard toolbar reserves when pinned at the bottom
     /// edge (toolbar-only mode, or toolbar visible without a docked
     /// software keyboard). Read by the selected tab's layout in
