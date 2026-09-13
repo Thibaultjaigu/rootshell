@@ -584,6 +584,14 @@ struct ShellCommands: Commands {
                 )
             }
             .modifier(DynamicShortcut(action: .open_settings, shortcuts: shortcutState.shortcuts))
+
+            Button("Quick Settings…") {
+                UIApplication.shared.sendAction(
+                    #selector(UIApplication.menuToggleQuickSettings(_:)),
+                    to: nil, from: nil, for: nil
+                )
+            }
+            .modifier(DynamicShortcut(action: .toggle_quick_settings, shortcuts: shortcutState.shortcuts))
         }
     }
 }
@@ -645,21 +653,13 @@ struct WindowCommands: Commands {
             }
             .modifier(DynamicShortcut(action: .show_tmux_sessions, shortcuts: shortcutState.shortcuts))
 
-            Button("Detach Session") {
+            Button("Discover Sessions") {
                 UIApplication.shared.sendAction(
-                    #selector(Ghostty.TerminalView.menuDetachSession(_:)),
+                    #selector(Ghostty.TerminalView.menuDiscoverSessions(_:)),
                     to: nil, from: nil, for: nil
                 )
             }
-            .modifier(DynamicShortcut(action: .detach_session, shortcuts: shortcutState.shortcuts))
-
-            Button("Detach All Sessions") {
-                UIApplication.shared.sendAction(
-                    #selector(Ghostty.TerminalView.menuDetachAllSessions(_:)),
-                    to: nil, from: nil, for: nil
-                )
-            }
-            .modifier(DynamicShortcut(action: .detach_all_sessions, shortcuts: shortcutState.shortcuts))
+            .modifier(DynamicShortcut(action: .discover_sessions, shortcuts: shortcutState.shortcuts))
 
             Button("Detach Other Clients") {
                 UIApplication.shared.sendAction(

@@ -23,12 +23,22 @@ struct KeybindEditorView: View {
     @Environment(\.sheetThemeColors) private var sheetThemeColors
     @ObservedObject private var keybindManager = KeybindManager.shared
 
+    /// Action the editor was opened for. `currentAction` may change if the user
+    /// jumps to a conflicting shortcut without dismissing the sheet.
+    let action: KeybindAction
+    /// Optional parameter for parameterized actions (e.g. profile UUID for `open_profile`)
+    var actionParameter: String? = nil
+    /// Optional title override (e.g. profile name). Falls back to `action.displayName`.
+    var titleOverride: String? = nil
+    /// When false, hide "Restore Default" (used for profile shortcuts whose default is none).
+    var allowsRestoreDefault: Bool = true
+    /// When non-nil, display this sequence instead of looking up the live KeybindManager
+    /// binding. Lets parents (e.g. profile editor) keep a draft until Save.
+    var draftSequence: KeySequence?? = nil
     /// Reports the user's choice to the parent. All paths that mutate
     /// `KeybindManager` route through this callback so the actual write
-    /// happens in the parent's sheet-onDismiss closure. Includes the action
-    /// currently on screen, which may have changed if the user jumped to a
-    /// conflicting shortcut without dismissing the sheet.
-    var onOutcome: (KeybindAction, KeybindEditorOutcome) -> Void = { _, _ in }
+    /// happens in the parent's sheet-onDismiss closure.
+    var onOutcome: (KeybindEditorOutcome) -> Void = { _ in }
     /// Optional: parent can follow an in-sheet jump to another action (e.g. to
     /// keep the shortcuts list on the matching category). The sheet stays open.
     var onSwitchAction: ((KeybindAction) -> Void)?
@@ -42,22 +52,56 @@ struct KeybindEditorView: View {
 
     init(
         action: KeybindAction,
-        onOutcome: @escaping (KeybindAction, KeybindEditorOutcome) -> Void = { _, _ in },
+        actionParameter: String? = nil,
+        titleOverride: String? = nil,
+        allowsRestoreDefault: Bool = true,
+        draftSequence: KeySequence?? = nil,
+        onOutcome: @escaping (KeybindEditorOutcome) -> Void = { _ in },
         onSwitchAction: ((KeybindAction) -> Void)? = nil
     ) {
+        self.action = action
+        self.actionParameter = actionParameter
+        self.titleOverride = titleOverride
+        self.allowsRestoreDefault = allowsRestoreDefault
+        self.draftSequence = draftSequence
         self.onOutcome = onOutcome
         self.onSwitchAction = onSwitchAction
         _currentAction = State(initialValue: action)
     }
 
     /// Current binding for this action (may be nil if displaced by external config)
-    private var binding: Keybind? {
-        keybindManager.keybind(for: currentAction)
+    private var managerBinding: Keybind? {
+        if let actionParameter {
+            keybindManager.keybind(for: currentAction, parameter: actionParameter)
+        } else {
+            keybindManager.keybind(for: currentAction)
+        }
+    }
+
+    /// Sequence shown in the "Current Shortcut" section
+    private var displayedSequence: KeySequence? {
+        if currentAction == action, let draftSequence {
+            return draftSequence
+        }
+        return managerBinding?.sequence
+    }
+
+    private var showsCustomBadge: Bool {
+        (currentAction != action || draftSequence == nil) && managerBinding?.isUserOverride == true
+    }
+
+    private var displayTitle: String {
+        if currentAction == action, let titleOverride {
+            return titleOverride
+        }
+        return currentAction.displayName
     }
 
     /// Single conflicting action the user can jump to from the warning, if any.
+    /// Profile (parameterized) editors stay on the profile instead of jumping.
     private var editableConflictAction: KeybindAction? {
-        guard conflictingBindings.count == 1,
+        guard actionParameter == nil,
+              conflictingBindings.count == 1,
               let conflict = conflictingBindings.first?.action,
               conflict != currentAction,
               KeybindAction.customizableActions.contains(conflict)
@@ -99,7 +143,7 @@ struct KeybindEditorView: View {
             VStack(spacing: 24) {
                 // Action info
                 VStack(spacing: 8) {
-                    Text(currentAction.displayName)
+                    Text(displayTitle)
                         .font(.title2)
                         .fontWeight(.semibold)
 
@@ -121,15 +165,15 @@ struct KeybindEditorView: View {
                         .font(.headline)
                         .foregroundColor(.secondary)
 
-                    if let binding {
-                        Text(binding.sequence.symbolDescription)
+                    if let displayedSequence {
+                        Text(displayedSequence.symbolDescription)
                             .font(.system(size: 28, weight: .medium, design: .monospaced))
                             .padding(.horizontal, 24)
                             .padding(.vertical, 16)
                             .background(rowBackground)
                             .cornerRadius(12)
 
-                        if binding.isUserOverride {
+                        if showsCustomBadge {
                             Label("Custom", systemImage: "star.fill")
                                 .font(.caption)
                                 .foregroundStyle(.tint)
@@ -146,17 +190,20 @@ struct KeybindEditorView: View {
                     }
 
                     if conflictingBindings.isEmpty {
-                        if (binding != nil && binding!.isUserOverride) || keybindManager.isActionUnbound(currentAction) {
+                        if allowsRestoreDefault,
+                           (currentAction != action || draftSequence == nil),
+                           (managerBinding != nil && managerBinding!.isUserOverride)
+                            || keybindManager.isActionUnbound(currentAction) {
                             Button("Restore Default") {
-                                onOutcome(currentAction, .restoreDefault)
+                                onOutcome(.restoreDefault)
                                 dismiss()
                             }
                             .foregroundColor(.orange)
                         }
 
-                        if binding != nil {
-                            Button("Unbind Shortcut") {
-                                onOutcome(currentAction, .unbind)
+                        if displayedSequence != nil {
+                            Button(allowsRestoreDefault ? "Unbind Shortcut" : "Clear Shortcut") {
+                                onOutcome(.unbind)
                                 dismiss()
                             }
                             .foregroundColor(.red)
@@ -307,7 +354,15 @@ struct KeybindEditorView: View {
             return
         }
 
-        let conflicts = keybindManager.conflicts(for: sequence, excluding: currentAction)
+        let conflicts = keybindManager.conflicts(
+            for: sequence,
+            excluding: actionParameter == nil ? currentAction : nil
+        ).filter { binding in
+            if let actionParameter {
+                return !(binding.action == currentAction && binding.actionParameter == actionParameter)
+            }
+            return true
+        }
         isCapturing = false
         showSequenceCapture = false
 
@@ -348,7 +403,7 @@ struct KeybindEditorView: View {
         // onDismiss closure — i.e. after the sheet has fully dismissed — so the
         // @Published cascade in setOverride runs in a quiescent view hierarchy
         // rather than mid-dismissal.
-        onOutcome(currentAction, .captured(sequence))
+        onOutcome(.captured(sequence))
         dismiss()
     }
 }

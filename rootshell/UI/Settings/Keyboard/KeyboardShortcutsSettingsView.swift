@@ -20,6 +20,9 @@ struct KeyboardShortcutsSettingsView: View {
     /// capture, restore-default, unbind — so every mutation is deferred
     /// uniformly.
     @State private var pendingOutcome: (action: KeybindAction, outcome: KeybindEditorOutcome)?
+    /// Tracks in-sheet jumps via “Edit [action] Instead” so dismiss applies to
+    /// the action currently on screen, not the one the sheet was opened for.
+    @State private var editorAction: KeybindAction?
     @State private var showConfigFilePicker = false
     @State private var showConfigEditor = false
     @State private var showResetConfirmation = false
@@ -91,14 +94,15 @@ struct KeyboardShortcutsSettingsView: View {
         ) { action in
             KeybindEditorView(
                 action: action,
-                onOutcome: { editedAction, outcome in
-                    pendingOutcome = (editedAction, outcome)
+                onOutcome: { outcome in
+                    pendingOutcome = (editorAction ?? action, outcome)
                 },
                 onSwitchAction: { conflict in
-                    // Stay in the same sheet; just keep the list behind it in sync.
+                    editorAction = conflict
                     selectedCategory = conflict.category
                 }
             )
+            .onAppear { editorAction = action }
             .themedSubSheet(sheetThemeColors)
         }
         .sheet(isPresented: $showConfigEditor) {
