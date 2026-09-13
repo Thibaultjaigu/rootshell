@@ -39,8 +39,9 @@ struct KeybindEditorView: View {
     /// `KeybindManager` route through this callback so the actual write
     /// happens in the parent's sheet-onDismiss closure.
     var onOutcome: (KeybindEditorOutcome) -> Void = { _ in }
-    /// Optional: parent can follow an in-sheet jump to another action (e.g. to
-    /// keep the shortcuts list on the matching category). The sheet stays open.
+    /// Enables in-sheet action switching. The parent must apply subsequent
+    /// outcomes to this action; callers without this callback stay on the
+    /// action the editor was opened for.
     var onSwitchAction: ((KeybindAction) -> Void)?
 
     @State private var currentAction: KeybindAction
@@ -100,7 +101,9 @@ struct KeybindEditorView: View {
     /// Single conflicting action the user can jump to from the warning, if any.
     /// Profile (parameterized) editors stay on the profile instead of jumping.
     private var editableConflictAction: KeybindAction? {
-        guard actionParameter == nil,
+        guard onSwitchAction != nil,
+              !action.isParameterized,
+              actionParameter == nil,
               conflictingBindings.count == 1,
               let conflict = conflictingBindings.first?.action,
               conflict != currentAction,
@@ -356,13 +359,9 @@ struct KeybindEditorView: View {
 
         let conflicts = keybindManager.conflicts(
             for: sequence,
-            excluding: actionParameter == nil ? currentAction : nil
-        ).filter { binding in
-            if let actionParameter {
-                return !(binding.action == currentAction && binding.actionParameter == actionParameter)
-            }
-            return true
-        }
+            excluding: currentAction,
+            excludingParameter: actionParameter
+        )
         isCapturing = false
         showSequenceCapture = false
 

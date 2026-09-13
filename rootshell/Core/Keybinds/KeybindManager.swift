@@ -280,7 +280,7 @@ final class KeybindManager: ObservableObject {
         // Snapshot who we are about to displace, before userOverrides change.
         let victims = action == .unbind
             ? []
-            : conflicts(for: sequence, excluding: action)
+            : conflicts(for: sequence, excluding: action, excludingParameter: parameter)
 
         if action == .unbind {
             // Unbind is special: multiple actions can be unbound simultaneously.
@@ -307,20 +307,19 @@ final class KeybindManager: ObservableObject {
             // Unbind the previous owners so they stay empty instead of
             // falling back to a free default. Applied before the new
             // binding so the new chord is not stripped.
-            for victim in victims where !victim.action.isParameterized {
-                userOverrides.removeAll { $0.action == victim.action }
-                userOverrides.removeAll {
-                    $0.action == .unbind && $0.actionParameter == victim.action.rawValue
-                }
-                userOverrides.append(
-                    Keybind(
-                        sequence: victim.sequence,
-                        action: .unbind,
-                        actionParameter: victim.action.rawValue,
-                        isUserOverride: true,
-                        source: .userOverride
-                    )
+            for victim in victims {
+                let unbind = Keybind(
+                    sequence: victim.sequence,
+                    action: .unbind,
+                    actionParameter: victim.action.rawValue,
+                    unboundActionParameter: victim.action.isParameterized ? victim.actionParameter : nil,
+                    isUserOverride: true,
+                    source: .userOverride
                 )
+                userOverrides.removeAll {
+                    unbind.unbinds($0) || $0.unbinds(victim)
+                }
+                userOverrides.append(unbind)
             }
         }
 
@@ -671,14 +670,10 @@ final class KeybindManager: ObservableObject {
         // Apply user overrides (highest priority)
         for override in userOverrides {
             if override.action == .unbind {
-                // Unbind targets the action in `actionParameter`, not the
-                // sequence. Clearing the sequence here would also strip a
-                // newer override that just took that chord.
-                if let raw = override.actionParameter,
-                   let unbound = KeybindAction(rawValue: raw),
-                   !unbound.isParameterized {
-                    bindings.removeAll { $0.action == unbound }
-                }
+                // Match the displaced owner, not every binding using its
+                // sequence. Parameterized owners also match their parameter
+                // and sequence so sibling bindings remain available.
+                bindings.removeAll { override.unbinds($0) }
                 continue
             }
 
@@ -834,10 +829,17 @@ final class KeybindManager: ObservableObject {
     // MARK: - Conflict Detection
 
     /// Check if a sequence would conflict with existing bindings
-    func conflicts(for sequence: KeySequence, excluding action: KeybindAction? = nil) -> [Keybind] {
+    func conflicts(
+        for sequence: KeySequence,
+        excluding action: KeybindAction? = nil,
+        excludingParameter parameter: String? = nil
+    ) -> [Keybind] {
         activeBindings.filter { binding in
-            // Skip the action we're checking for
-            if let excludedAction = action, binding.action == excludedAction {
+            // A parameterized editor owns only its matching parameter. A new
+            // profile has no parameter yet, so all existing profiles conflict.
+            if let excludedAction = action, binding.action == excludedAction,
+               !excludedAction.isParameterized
+                || (parameter != nil && binding.actionParameter == parameter) {
                 return false
             }
 
