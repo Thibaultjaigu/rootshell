@@ -278,6 +278,29 @@ final class TerminalCorrectionContextTests: XCTestCase {
         XCTAssertNil(context.recentEditRange)
     }
 
+    func testEndedWithoutSessionRevokesAdoptionCandidate() {
+        var context = Context()
+        context.apply(.text("i", eligible: true))
+        XCTAssertTrue(context.canAdoptDictation(in: NSRange(location: 0, length: 1)))
+        let identity = context.documentGeneration
+        context.apply(.dictationEnded)
+        XCTAssertNil(context.recentEditRange)
+        XCTAssertFalse(context.canAdoptDictation(in: NSRange(location: 0, length: 1)))
+        XCTAssertEqual(context.documentGeneration, identity)
+    }
+
+    func testAdoptionRefusesMultiScalarOrNonPrintableErase() {
+        var context = Context()
+        context.apply(.text("👨‍👩‍👧", eligible: false))
+        XCTAssertFalse(context.canAdoptDictation(in: NSRange(location: 0, length: context.document.utf16.count)))
+        var tab = Context()
+        tab.apply(.text("a\t", eligible: false))
+        XCTAssertNil(tab.recentEditRange)
+        var long = Context()
+        long.apply(.text(String(repeating: "word ", count: 20), eligible: false))
+        XCTAssertTrue(long.canAdoptDictation(in: NSRange(location: 0, length: 100)))
+    }
+
     func testQuickTypeCorrectionAlsoRecordsRecentEdit() {
         var context = Context()
         context.apply(.text("teh ", eligible: true))

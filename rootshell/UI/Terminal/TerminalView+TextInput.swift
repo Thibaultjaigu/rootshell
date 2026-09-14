@@ -166,10 +166,11 @@ extension Ghostty.TerminalView {
         dictationSettleDeadline = ProcessInfo.processInfo.systemUptime + 10
     }
 
+    /// Applied even without a session: a boundary must also revoke the
+    /// signal-free adoption candidate left by the latest edit.
     func endDictationSession() {
         dictationSettleDeadline = nil
         pendingDictationPlaceholderTokens.removeAll()
-        guard correctionContext.dictation != nil else { return }
         mutateInputDocument(.dictationEnded)
     }
 

@@ -56,9 +56,15 @@ nonisolated struct TerminalCorrectionContext {
 
     var isReceivingDictation: Bool { dictation?.phase == .receiving }
 
+    /// Adoption has no signal behind it, so the erased tail keeps the
+    /// QuickType deletion safeguards. Length and replay stay unbounded:
+    /// hypotheses run long and may replay a newline.
     func canAdoptDictation(in range: NSRange) -> Bool {
-        guard dictation == nil, let recent = recentEditRange, range.length > 0 else { return false }
-        return range.location >= recent.location && NSMaxRange(range) <= NSMaxRange(recent)
+        guard dictation == nil, let recent = recentEditRange, range.length > 0,
+              range.location >= recent.location, NSMaxRange(range) <= NSMaxRange(recent),
+              let indices = Self.range(range, in: document) else { return false }
+        let erased = document[indices.lowerBound...]
+        return erased.allSatisfy({ $0.unicodeScalars.count == 1 }) && Self.isPrintable(String(erased))
     }
 
     static func range(_ range: NSRange, in text: String) -> Range<String.Index>? {
