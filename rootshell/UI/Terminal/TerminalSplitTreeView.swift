@@ -109,6 +109,7 @@ final class SplitTreeHostingView: UIView {
     private var tree: SplitTree<SplitPaneView>?
     private var focusedPane: SplitPaneView?
     private var hasCompletedHerdrLayout = false
+    private let herdrMetricsRefresh = HerdrLayoutRefresh()
     private var needsFocusRestoration = false
     private var focusRestorationGeneration: UInt64 = 0
 
@@ -231,6 +232,7 @@ final class SplitTreeHostingView: UIView {
     /// full screen lives under the takeover container.
     func detachAllPanes() {
         hasCompletedHerdrLayout = false
+        herdrMetricsRefresh.cancel()
         needsFocusRestoration = false
         focusRestorationGeneration &+= 1
         paneRearrangement.detach()
@@ -420,6 +422,23 @@ final class SplitTreeHostingView: UIView {
         hasCompletedHerdrLayout && window != nil && pane.window === window
             && !pane.isDetachedForFullScreen
             && attachedContainers[ObjectIdentifier(pane)]?.superview === self
+    }
+
+    /// The first frame is calculated before insertion creates the surface.
+    /// Revisit it with real cell metrics even if a foreign owner keeps the
+    /// server geometry unchanged. Defer so every leaf finishes insertion,
+    /// and coalesce the insertion and cell-size callbacks into one refresh.
+    func herdrSurfaceMetricsDidChange() {
+        herdrMetricsRefresh.request { [weak self] in
+            guard let self else { return }
+            guard self.window != nil, let tree = self.tree,
+                  let pane = tree.terminalLeaves.first(where: {
+                      $0.isHerdrPane && !$0.usesHerdrFallbackScrolling
+                          && !$0.isDetachedForFullScreen && $0.enclosingSplitHost === self
+                  }) else { return }
+            pane.refreshHerdrLayoutForSurfaceMetrics()
+            self.setNeedsLayout()
+        }
     }
 
     /// herdr tabs size from this container, not from their panes: the panes
@@ -879,7 +898,8 @@ final class SplitTreeHostingView: UIView {
         }
 
         // Attach the container (for terminals, it contains the terminal view)
-        if container.superview !== self {
+        let newlyAttached = container.superview !== self
+        if newlyAttached {
             container.removeFromSuperview()
 
             // A non-terminal pane may carry a live child view controller. Give
@@ -897,6 +917,11 @@ final class SplitTreeHostingView: UIView {
         container.frame = frame
         container.setNeedsLayout()
         updateProgressBarRouting(for: identifier, container: container)
+
+        if newlyAttached, let terminal = pane.asTerminal,
+           terminal.isHerdrPane, !terminal.usesHerdrFallbackScrolling {
+            herdrSurfaceMetricsDidChange()
+        }
 
         // Mark a tmux pane as container-laid-out now that it has its real frame.
         // sizeDidChange ignores a tmux pane's size until this is set, so the

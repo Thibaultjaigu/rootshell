@@ -4906,6 +4906,7 @@ extension Ghostty.TerminalView: GhosttyActionDelegate {
     }
     
     func handleCellSizeChange(width: CGFloat, height: CGFloat) {
+        let metricsChanged = cellSize != CGSize(width: width, height: height)
         self.cellSize = CGSize(width: width, height: height)
         Ghostty.logger.info("Cell size changed: \(width)x\(height)")
         // The grid's whole-row remainder (terminalTopGridAlignmentPadding)
@@ -4929,6 +4930,11 @@ extension Ghostty.TerminalView: GhosttyActionDelegate {
         // cell-size change (keyboard, pinch, and the Settings font path).
         if isTmuxPane {
             NotificationCenter.default.post(name: .terminalLayoutInvalidation, object: nil)
+        } else if isHerdrPane, !usesHerdrFallbackScrolling, metricsChanged {
+            // Resizing this view alone preserves the provisional frame that
+            // was chosen before its surface existed. The host must recompute
+            // the frame (and split ratios) using the new cell dimensions.
+            enclosingSplitHost?.herdrSurfaceMetricsDidChange()
         }
     }
     

@@ -2,6 +2,31 @@ import Foundation
 import CoreGraphics
 import IOSurface
 
+/// Insertion can create a surface partway through a host layout. Reconcile
+/// after that pass, when its cell metrics are available, without scheduling
+/// one refresh per pane or retaining a host that has been dismantled.
+@MainActor
+final class HerdrLayoutRefresh {
+    private var pending = false
+    private var generation: UInt64 = 0
+
+    func request(_ refresh: @escaping @MainActor () -> Void) {
+        guard !pending else { return }
+        pending = true
+        let generation = self.generation
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.generation == generation else { return }
+            self.pending = false
+            refresh()
+        }
+    }
+
+    func cancel() {
+        generation &+= 1
+        pending = false
+    }
+}
+
 /// Geometry for the UIKit Ghostty surfaces used by herdr panes, including
 /// Catalyst. Ghostty's iOS/visionOS font backend uses 96 DPI; its configured
 /// window padding is in 72-DPI typographic points, not UIKit points.

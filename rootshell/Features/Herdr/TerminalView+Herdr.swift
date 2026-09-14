@@ -263,6 +263,10 @@ extension Ghostty.TerminalView {
         herdrPaneController?.hostLayoutDidChange(for: self)
     }
 
+    func refreshHerdrLayoutForSurfaceMetrics() {
+        herdrPaneController?.refreshLayoutForSurfaceMetrics(from: self)
+    }
+
     func requestHerdrToggleZoom() {
         herdrPaneController?.requestToggleZoom(self)
     }

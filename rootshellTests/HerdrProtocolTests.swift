@@ -140,6 +140,68 @@ final class HerdrProtocolTests: XCTestCase {
         XCTAssertTrue(json.contains("\"claim\":false"))
     }
 
+    // MARK: Initial layout bootstrap
+
+    /// A foreign owner's size stays fixed: no server layout or user input
+    /// arrives to rescue a frame calculated before surface creation.
+    @MainActor
+    func testInitialLayoutRefreshWaitsForSurfaceMetrics() async {
+        @MainActor final class SurfaceMetrics {
+            var cellPixels: UInt32 = 0
+        }
+        let metrics = SurfaceMetrics()
+        let refresh = HerdrLayoutRefresh()
+        var frameWidth: CGFloat = 390
+        var refreshes = 0
+        let refreshed = expectation(description: "initial layout refreshed")
+        refresh.request {
+            refreshes += 1
+            // The deferred pass can now lay out all 120 server columns
+            // on the phone, overflowing its viewport until input claims.
+            frameWidth = HerdrGeometry.requiredExtent(
+                cells: 120, cellPixels: metrics.cellPixels, chrome: 8, scale: 3)
+            refreshed.fulfill()
+        }
+        XCTAssertEqual(refreshes, 0)
+        // Insertion creates the surface after the first frame calculation.
+        metrics.cellPixels = 24
+        refresh.request { XCTFail("cell callback should coalesce with insertion") }
+        await fulfillment(of: [refreshed], timeout: 2)
+        withExtendedLifetime(refresh) {}
+        XCTAssertEqual(refreshes, 1)
+        XCTAssertGreaterThan(frameWidth, 390)
+        XCTAssertEqual(HerdrGeometry.cellBudget(extent: frameWidth, chrome: 8, cell: 8), 120)
+    }
+
+    @MainActor
+    func testDismantledHostCancelsPendingLayoutRefresh() async {
+        let refresh = HerdrLayoutRefresh()
+        let refreshed = expectation(description: "replacement layout refreshed")
+        refresh.request { XCTFail("a dismantled host must not refresh its old panes") }
+        refresh.cancel()
+        // A host reused before the old callback runs still gets its own
+        // refresh; the cancelled callback cannot consume the new request.
+        refresh.request { refreshed.fulfill() }
+        await fulfillment(of: [refreshed], timeout: 2)
+        withExtendedLifetime(refresh) {}
+    }
+
+    @MainActor
+    func testLaterCellMetricsCanScheduleAnotherLayoutRefresh() async {
+        let refresh = HerdrLayoutRefresh()
+        var refreshes = 0
+        for _ in 0..<2 {
+            let refreshed = expectation(description: "cell metrics refreshed")
+            refresh.request {
+                refreshes += 1
+                refreshed.fulfill()
+            }
+            await fulfillment(of: [refreshed], timeout: 2)
+        }
+        withExtendedLifetime(refresh) {}
+        XCTAssertEqual(refreshes, 2)
+    }
+
     // MARK: Tab geometry ownership
 
     private let size = HerdrTabGeometryState.Size(cols: 100, rows: 40, cellWidth: 8, cellHeight: 16)

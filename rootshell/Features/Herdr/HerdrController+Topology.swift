@@ -483,6 +483,25 @@ extension HerdrController {
 
     // MARK: - Layout
 
+    /// Initial topology can build ratios before any surface has cell metrics.
+    /// Rebuild from the current raw layout once they exist; a store-only size
+    /// push by a viewer will not elicit another layout from the server.
+    func refreshLayoutForSurfaceMetrics(from view: Ghostty.TerminalView) {
+        guard mode == .raw, isActive, !didEnd,
+              let binding = view.herdrPaneBinding, binding.gatewayUUID == gatewayUUID,
+              paneViews[binding.terminalId] === view,
+              let tab = tabs[binding.tabId], tab.id == view.containingTabID,
+              let layout = controlLayouts[binding.tabId],
+              let node = HerdrLayoutTree.build(layout),
+              let root = buildSplitNode(node) else { return }
+        let tree = SplitTree<SplitPaneView>(root: root, zoomed: tab.splitTree.zoomed)
+        // This is only a metric refresh. Preserve local focus and zoom, and
+        // never restore an old pane set while a topology change is arriving.
+        guard tree.structuralIdentity == tab.splitTree.structuralIdentity,
+              tree.root != tab.splitTree.root else { return }
+        tab.splitTree = tree
+    }
+
     func applyLayout(_ layout: HerdrControl.LayoutSnapshot, barrier: UInt64? = nil) {
         lastLayouts[layout.tab_id] = layout
         guard let tab = tabs[layout.tab_id] else { return }
