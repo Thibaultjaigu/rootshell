@@ -309,7 +309,7 @@ final class SplitTreeHostingView: UIView {
         pushTmuxClientSizeIfNeeded()
         pushHerdrTabSizeIfNeeded()
         // Frost the dead margin (single- AND multi-pane) over `bounds − contentRect`.
-        updateDeadMarginOverlay(contentRect: contentRect)
+        updateDeadMarginOverlay(contentRect: contentRect ?? herdrForeignMargin())
         // Overlay chrome follows actual pane frames, including tmux's dead margin.
         paneRearrangement.update(tree: tree, enabled: isActiveTab && allowsPaneRearrangement && onMove != nil)
         paneRearrangement.layout()
@@ -485,21 +485,42 @@ final class SplitTreeHostingView: UIView {
         guard let tree,
               let rootNode = tree.zoomed ?? tree.root,
               let pane = multiplexerMetricPane(in: tree), pane.isHerdrPane,
-              let cells = tmuxWindowCells(),
               let size = pane.surfaceSize,
               size.cell_width_px > 0, size.cell_height_px > 0
         else { return nil }
+        // Another client sized the tab: lay the tree out in its rectangle.
+        // Smaller leaves a margin; larger overflows and is clipped.
+        guard let budget = tmuxWindowCells() else { return nil }
+        let foreign = pane.herdrForeignAreaCells
+        let cells = foreign.map { (cols: UInt16(clamping: $0.cols), rows: UInt16(clamping: $0.rows)) } ?? budget
+        // Each axis overflows on its own: a 120x24 tab in an 80x40 host is
+        // wider than the viewport but shorter.
+        let wideOverflow = cells.cols > budget.cols
+        let tallOverflow = cells.rows > budget.rows
         let scale = pane.contentScaleFactor > 0 ? pane.contentScaleFactor : pane.traitCollection.displayScale
         guard scale > 0 else { return nil }
         let cellW = CGFloat(size.cell_width_px) / scale
         let cellH = CGFloat(size.cell_height_px) / scale
         let chrome = tmuxChrome(node: rootNode, cellW: cellW, cellH: cellH, separatorCredit: false)
-        let contentW = min(bounds.width, CGFloat(cells.cols) * cellW + chrome.h)
-        let contentH = min(bounds.height, CGFloat(cells.rows) * cellH + chrome.v)
+        let neededW = CGFloat(cells.cols) * cellW + chrome.h
+        let neededH = CGFloat(cells.rows) * cellH + chrome.v
+        let contentW = wideOverflow ? neededW : min(bounds.width, neededW)
+        let contentH = tallOverflow ? neededH : min(bounds.height, neededH)
         guard contentW > 1, contentH > 1,
-              bounds.width - contentW > 0.5 || bounds.height - contentH > 0.5
+              wideOverflow || tallOverflow || bounds.width - contentW > 0.5 || bounds.height - contentH > 0.5
         else { return nil }
         return CGRect(x: bounds.minX, y: bounds.minY, width: contentW, height: contentH)
+    }
+
+    /// Frost the margin outside a tab another herdr client sized at least a
+    /// cell smaller than this container, as the tmux dead margin does.
+    private func herdrForeignMargin() -> CGRect? {
+        guard let tree, let pane = multiplexerMetricPane(in: tree), pane.isHerdrPane,
+              let foreign = pane.herdrForeignAreaCells, let budget = tmuxWindowCells(),
+              foreign.cols < Int(budget.cols) || foreign.rows < Int(budget.rows),
+              let rect = herdrSnapRect() else { return nil }
+        // An axis that overflows has no margin to frost; clip it to bounds.
+        return rect.intersection(bounds)
     }
 
     /// The non-grid space (points) a rendered tmux split tree needs beyond
@@ -787,6 +808,17 @@ final class SplitTreeHostingView: UIView {
             frame.width, cells: grid.cols, cellPixels: size.cell_width_px, chrome: chrome.width, scale: scale)
         clamped.size.height = HerdrGeometry.clampedExtent(
             frame.height, cells: grid.rows, cellPixels: size.cell_height_px, chrome: chrome.height, scale: scale)
+        if terminal.herdrForeignAreaCells != nil {
+            // Another client's grid may exceed this slot on either axis: that
+            // axis grows to the exact grid, overflowing and clipped, while the
+            // other keeps the clamp above (a 120x24 tab in an 80x40 host).
+            let neededW = HerdrGeometry.requiredExtent(
+                cells: grid.cols, cellPixels: size.cell_width_px, chrome: chrome.width, scale: scale)
+            let neededH = HerdrGeometry.requiredExtent(
+                cells: grid.rows, cellPixels: size.cell_height_px, chrome: chrome.height, scale: scale)
+            if neededW > frame.width + 1 { clipsToBounds = true; clamped.size.width = neededW }
+            if neededH > frame.height + 1 { clipsToBounds = true; clamped.size.height = neededH }
+        }
         return clamped
     }
 

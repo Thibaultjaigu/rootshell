@@ -549,6 +549,8 @@ extension Ghostty {
         /// control mode. nil for pane views and non-herdr sessions.
         var herdrController: HerdrController?
         var herdrGatewayHost: UIHostingController<HerdrGatewayView>?
+        /// Covers a projected pane another herdr client holds (single-owner servers).
+        var herdrPaneControlHost: UIHostingController<HerdrPaneControlOverlay>?
 
         /// A takeover leaves this gateway at its shell until an explicit attach.
         /// Retained across transport reconnects for the lifetime of this view.
