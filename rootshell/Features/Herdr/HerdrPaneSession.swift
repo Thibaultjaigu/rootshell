@@ -27,12 +27,15 @@ nonisolated final class HerdrOutputRouter: @unchecked Sendable {
         case snapshot(Data, cols: Int, rows: Int)
         /// Emitted verbatim ahead of the held carry: a parser probe.
         case control(Data)
+        /// Ordered with PTY output; its reply changes the response policy.
+        case authority(Bool)
         /// A layout boundary: everything after it waits until released.
         case barrier(UInt64)
 
         var byteCount: Int {
             switch self {
             case .data(let data), .snapshot(let data, _, _), .control(let data): return data.count
+            case .authority(let value): return HerdrQueryAuthority.marker(answersQueries: value).count
             case .barrier: return 0
             }
         }
@@ -42,6 +45,8 @@ nonisolated final class HerdrOutputRouter: @unchecked Sendable {
     private var sinks: [String: OutputSink] = [:]
     private var grids: [String: (cols: Int, rows: Int)] = [:]
     private var snapshotRevisions: [String: UUID] = [:]
+    private var queryAuthorityEnabled = false
+    private var queryAuthorities: [String: Bool] = [:]
     /// Per attach, the escape or UTF-8 sequence the last emitted chunk ended
     /// inside. herdr forwards raw PTY reads, so a sequence can straddle two
     /// records; Ghostty only ever receives whole ones.
@@ -79,6 +84,7 @@ nonisolated final class HerdrOutputRouter: @unchecked Sendable {
             _ = sinks.removeValue(forKey: attachId)
             grids.removeValue(forKey: attachId)
             snapshotRevisions.removeValue(forKey: attachId)
+            queryAuthorities.removeValue(forKey: attachId)
             carries.removeValue(forKey: attachId)
             if let dropped = queues.removeValue(forKey: attachId) {
                 queuedBytes -= dropped.reduce(0) { $0 + $1.byteCount }
@@ -115,6 +121,7 @@ nonisolated final class HerdrOutputRouter: @unchecked Sendable {
             sinks.removeAll()
             grids.removeAll()
             snapshotRevisions.removeAll()
+            queryAuthorities.removeAll()
             carries.removeAll()
             queues.removeAll()
             queuedBytes = 0
@@ -127,6 +134,14 @@ nonisolated final class HerdrOutputRouter: @unchecked Sendable {
 
     func setPane(_ paneId: String, attachId: String) {
         lock.withLock { attachByPane[paneId] = attachId }
+    }
+
+    func configureQueryAuthority(enabled: Bool) {
+        lock.withLock { queryAuthorityEnabled = enabled }
+    }
+
+    func setQueryAuthority(attachId: String, answersQueries: Bool) {
+        deliver(attachId: attachId, .authority(answersQueries), isSnapshot: false)
     }
 
     func updateGrid(attachId: String, cols: Int, rows: Int) {
@@ -198,6 +213,11 @@ nonisolated final class HerdrOutputRouter: @unchecked Sendable {
     private func deliver(attachId: String, _ item: QueueItem, isSnapshot: Bool) {
         var overflowNow = false
         lock.withLock {
+            if case .authority(let value) = item {
+                // Keep the latest standing even if a gap drops its marker;
+                // a replacement snapshot must restore it before live output.
+                queryAuthorities[attachId] = value
+            }
             if overflowed.contains(attachId) {
                 // Only the snapshot we asked for can make the screen whole.
                 guard isSnapshot else { return }
@@ -219,8 +239,15 @@ nonisolated final class HerdrOutputRouter: @unchecked Sendable {
                 overflowNow = true
                 return
             }
-            queues[attachId, default: []].append(item)
-            queuedBytes += item.byteCount
+            var queuedItem = item
+            if case .snapshot(let bytes, let cols, let rows) = item {
+                let authority = queryAuthorities[attachId] ?? !queryAuthorityEnabled
+                // A discarded oversized escape can leave the parser inside
+                // a string; cancel it before asking for the authority marker.
+                queuedItem = .snapshot(Data([0x18]) + HerdrQueryAuthority.marker(answersQueries: authority) + bytes, cols: cols, rows: rows)
+            }
+            queues[attachId, default: []].append(queuedItem)
+            queuedBytes += queuedItem.byteCount
         }
         if overflowNow {
             onOverflow?(attachId)
@@ -259,6 +286,8 @@ nonisolated final class HerdrOutputRouter: @unchecked Sendable {
                     data = splitCarry(attachId: attachId, appending: bytes)
                 case .control(let bytes):
                     data = bytes
+                case .authority(let value):
+                    data = HerdrQueryAuthority.marker(answersQueries: value)
                 case .snapshot(let bytes, let cols, let rows)
                     where grids[attachId]?.cols == cols && grids[attachId]?.rows == rows:
                     data = bytes
@@ -427,14 +456,14 @@ final class HerdrPaneSession: TerminalSession {
     var attachId: String?
     private(set) weak var controller: HerdrController?
 
-    private(set) var parserGrid: TerminalGridReports.Grid?
-    private var wantedParserGrid: TerminalGridReports.Grid?
+    var parserGrid: TerminalGridReports.Grid? { parserGridConfirmation.confirmed }
+    private var parserGridConfirmation = HerdrParserGrid()
     /// Unfinished escape sequence from the last response-pipe read.
     private var responseCarry = Data()
     private var responseCarryFlush: Task<Void, Never>?
-    private var gridReports = TerminalGridReports()
     private var gridProbeTask: Task<Void, Never>?
     private var parserFence = HerdrParserFence()
+    private var queryAuthority = HerdrQueryAuthority()
     struct MobileReadFence {
         let id: Int
         let generation: UUID
@@ -529,14 +558,18 @@ final class HerdrPaneSession: TerminalSession {
         // Filter after the existing response reassembly. Keeping a second
         // ambiguous ESC carry ahead of it could swallow a user's Escape key
         // forever when a queued probe was discarded by a replacement snapshot.
-        let fences = parserFence.consume(pending)
-        for id in fences.acknowledged {
-            guard let fence = mobileReadFence, fence.id == id else { continue }
-            mobileReadFence = nil
-            controller?.mobileParserDidDrain(self, fence: fence)
+        for segment in queryAuthority.consume(pending) {
+            let fences = parserFence.consume(segment.bytes)
+            for id in fences.acknowledged {
+                guard let fence = mobileReadFence, fence.id == id else { continue }
+                mobileReadFence = nil
+                controller?.mobileParserDidDrain(self, fence: fence)
+            }
+            guard !fences.forward.isEmpty else { continue }
+            let automatic = HerdrReplyFilter.isAutomaticReply(fences.forward)
+            guard !automatic || segment.answersQueries else { continue }
+            controller?.sendInput(from: self, fences.forward, automaticReply: automatic)
         }
-        guard !fences.forward.isEmpty else { return }
-        controller?.sendInput(from: self, fences.forward, automaticReply: HerdrReplyFilter.isAutomaticReply(fences.forward))
     }
 
     private static let maxResponseCarryBytes = 64 * 1024
@@ -549,19 +582,18 @@ final class HerdrPaneSession: TerminalSession {
     /// replay. A delay or timeout never counts as a resize acknowledgement.
     func confirmParserGrid(cols: Int, rows: Int) {
         let wanted = TerminalGridReports.Grid(cols: cols, rows: rows)
-        wantedParserGrid = wanted
-        guard parserGrid != wanted, gridProbeTask == nil, isRunning else { return }
+        parserGridConfirmation.request(wanted)
+        guard parserGridConfirmation.needsProbe, gridProbeTask == nil, isRunning else { return }
         gridProbeTask = Task { [weak self] in
             defer { self?.gridProbeTask = nil }
             var lastProbe = ContinuousClock.now
             while let self, self.isRunning, !Task.isCancelled,
-                  self.parserGrid != self.wantedParserGrid {
-                if self.gridReports.pending == 0 || lastProbe.duration(to: .now) >= .seconds(1) {
-                    self.gridReports.pending += 1
+                  self.parserGridConfirmation.needsProbe {
+                if self.parserGridConfirmation.pending == 0 || lastProbe.duration(to: .now) >= .seconds(1) {
                     // Through the router, so the probe lands between whole
                     // sequences of live output. Before the attach exists,
                     // and in fallback mode, nothing else is flowing.
-                    let probe = Data("\u{1b}[18t".utf8)
+                    let probe = self.parserGridConfirmation.probe()
                     let injected = self.attachId.map {
                         self.controller?.router.inject(attachId: $0, probe) == true
                     } ?? false
@@ -576,13 +608,22 @@ final class HerdrPaneSession: TerminalSession {
         }
     }
 
+    func invalidateParserGrid() {
+        parserGridConfirmation.invalidate()
+    }
+
     /// Called only for the response pipe, so keyboard/paste input does not
     /// get mistaken for an internal probe reply.
     func consumeParserGridReports(_ data: Data) -> Data {
-        let result = gridReports.consume(data)
+        let result = parserGridConfirmation.consume(data)
         for grid in result.grids {
-            parserGrid = grid
             controller?.paneParserGridDidChange(self, cols: grid.cols, rows: grid.rows)
+        }
+        // A retry can still have a reply in flight when the first matching
+        // reply stops polling. Keep recovery live if that later observation
+        // says the parser moved again.
+        if parserGridConfirmation.needsProbe, let wanted = parserGridConfirmation.wanted {
+            confirmParserGrid(cols: wanted.cols, rows: wanted.rows)
         }
         return result.forward
     }

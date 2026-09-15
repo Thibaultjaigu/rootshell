@@ -74,9 +74,9 @@ extension HerdrController {
             return
         }
         guard let attachId = session.attachId, let channel else { return }
-        // Only the query authority answers, but the server decides: a reply
-        // to a query that predates an authority hand-off is still wanted,
-        // and only the server knows its grace window. Never drop here.
+        // The session gates replies at the parser's authority boundary.
+        // Still mark them automatic: the server's grace window admits an
+        // outstanding reply from before the handoff without claiming input.
         let auto: Bool? = automaticReply && capabilities.supports(.autoInput) ? true : nil
         Task { await channel.sendInput(attachId: attachId, bytes: data, auto: auto) }
     }
@@ -330,7 +330,8 @@ extension HerdrController {
         }
         // Live output keeps flowing onto the reflowed grid, as it would in a
         // native terminal; the program's SIGWINCH redraw settles the screen.
-        if session.parserGrid != TerminalGridReports.Grid(cols: cols, rows: rows) {
+        let awaitingLayout = layoutReleases.values.contains { $0.expected[session.terminalId] != nil }
+        if !awaitingLayout, session.parserGrid != TerminalGridReports.Grid(cols: cols, rows: rows) {
             session.confirmParserGrid(cols: cols, rows: rows)
         }
         updateRouterGrid(terminalId: session.terminalId)
@@ -405,7 +406,8 @@ extension HerdrController {
         }
         #endif
         tabGeometryStates[tabId, default: .init()].update(size)
-        guard geometryTasks[tabId] == nil, tabGeometryStates[tabId]?.isConfirmed == false else { return }
+        guard geometryTasks[tabId] == nil,
+              tabGeometryStates[tabId]?.isConfirmed == false || mobileClaimGeneration(for: tabId) != nil else { return }
         // A protocol 1 server always claims; only send its size when we may.
         guard capabilities.supportsSharedViewing || tabGeometryStates[tabId]?.mayClaim != false else { return }
         let generation = streamGeneration
@@ -449,12 +451,15 @@ extension HerdrController {
                     guard self.mobileWindowIsActive, tab.id == self.tabsModel.selectedTabID else { return }
                 }
                 #endif
-                guard let request = self.tabGeometryStates[tabId]?.beginRequest() else { return }
+                let activation = self.mobileClaimGeneration(for: tabId)
+                guard let request = self.tabGeometryStates[tabId]?.beginRequest(claim: activation != nil) else { return }
                 let size = request.size
                 // While another client owns the tab this only stores our size,
                 // so the server can apply it the moment we interact.
-                let activation = self.mobileClaimGeneration(for: tabId)
-                let claims = activation != nil || (self.tabGeometryStates[tabId]?.mayClaim ?? true)
+                let claims = request.claim
+                // Consume intent when sent. Retrying after an ambiguous
+                // response must not take the tab back from a newer owner.
+                if let activation { self.mobileActivation.claimed(generation: activation) }
                 var params = HerdrControl.TabGeometryParams(
                     tab_id: tabId, cols: size.cols, rows: size.rows,
                     cell_width_px: size.cellWidth, cell_height_px: size.cellHeight
@@ -466,9 +471,6 @@ extension HerdrController {
                     guard !Task.isCancelled, self.streamGeneration == generation,
                           self.channel === channel, self.tabs[tabId] === tab else { return }
                     self.tabGeometryStates[tabId]?.finish(request, succeeded: true)
-                    if let activation {
-                        self.mobileActivation.claimed(generation: activation)
-                    }
                     failures = 0
                     self.pumpAttachQueue()
                     self.requestSnapshotsForReadyPanes()
@@ -541,15 +543,8 @@ extension HerdrController {
         }
         var expected: [String: (cols: Int, rows: Int)] = [:]
         for pane in layout.panes {
-            guard let terminalId = paneInfos[pane.pane_id]?.terminal_id,
-                  let attachId = attachIds[terminalId] else { continue }
+            guard let terminalId = paneInfos[pane.pane_id]?.terminal_id else { continue }
             let wanted = (cols: pane.rect.width, rows: pane.rect.height)
-            if let size = paneSessions[terminalId]?.parserGrid,
-               size.cols == wanted.cols, size.rows == wanted.rows {
-                // Already there, so no parser confirmation will follow.
-                settleClientDetour(terminalId: terminalId, cols: wanted.cols, rows: wanted.rows)
-                continue
-            }
             // A zoomed-away or detached pane cannot acknowledge a native
             // resize. Recover it when hosted again without holding up the
             // other panes' redraw for the entire deadline.
@@ -557,10 +552,15 @@ extension HerdrController {
                   !view.suppressPTYSizeUpdates,
                   !layout.zoomed || pane.pane_id == layout.focused_pane_id else {
                 clientDetourMinimums.removeValue(forKey: terminalId)
-                router.invalidate(attachId: attachId)
-                panesNeedingSnapshot.insert(terminalId)
+                if let attachId = attachIds[terminalId] {
+                    router.invalidate(attachId: attachId)
+                    panesNeedingSnapshot.insert(terminalId)
+                }
                 continue
             }
+            // Initial attach itself waits for parser confirmation. Include
+            // mounted panes before they have an attach ID, or cold restore
+            // waits for an attach that can never become ready.
             expected[terminalId] = wanted
         }
         guard !expected.isEmpty else {
@@ -581,6 +581,16 @@ extension HerdrController {
         )
     }
 
+    /// Called after this layout's forced surface-size updates have crossed
+    /// the Ghostty API queue. An older layout's completion cannot release a
+    /// replacement layout, including A -> B -> A with identical dimensions.
+    func confirmLayoutParserGrids(barrier: UInt64) {
+        guard let release = layoutReleases[barrier] else { return }
+        for (terminalId, wanted) in release.expected {
+            paneSessions[terminalId]?.confirmParserGrid(cols: wanted.cols, rows: wanted.rows)
+        }
+    }
+
     private func completeLayoutRelease(barrier: UInt64) {
         guard let release = layoutReleases.removeValue(forKey: barrier) else { return }
         release.deadline?.cancel()
@@ -591,6 +601,9 @@ extension HerdrController {
                 router.invalidate(attachId: attachId)
                 panesNeedingSnapshot.insert(terminalId)
             }
+            if let wanted = release.expected[terminalId] {
+                paneSessions[terminalId]?.confirmParserGrid(cols: wanted.cols, rows: wanted.rows)
+            }
         }
         router.release(barrier: barrier)
         // Panes whose earlier redraw was discarded rebuild at this grid; the
@@ -598,7 +611,7 @@ extension HerdrController {
         for attachId in release.snapshotOnComplete {
             requestSnapshot(attachId: attachId)
         }
-        reconcileMobileReturnToLive()
+        requestSnapshotsForReadyPanes()
     }
 
     private func noteGridForLayoutRelease(terminalId: String, cols: Int, rows: Int) {

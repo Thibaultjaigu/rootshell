@@ -561,10 +561,17 @@ extension HerdrController {
         // Ratios changed under the panes; force each surface to re-sync its
         // grid after the layout pass (mirrors the tmux path).
         let views = node.paneIds.compactMap { paneInfos[$0]?.terminal_id }.compactMap { paneViews[$0] }
-        DispatchQueue.main.async {
+        DispatchQueue.main.async { [weak self] in
             for view in views {
                 view.invalidateCachedSize()
                 view.sizeDidChange(view.bounds.size)
+            }
+            if let barrier {
+                Ghostty.TerminalView.ghosttyAPIQueue.async {
+                    Task { @MainActor [weak self] in
+                        self?.confirmLayoutParserGrids(barrier: barrier)
+                    }
+                }
             }
         }
     }

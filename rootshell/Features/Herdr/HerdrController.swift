@@ -442,6 +442,8 @@ final class HerdrController {
                         return
                     case .snapshot(let record):
                         router.applySnapshot(record)
+                    case .authority(let record):
+                        router.setQueryAuthority(attachId: record.attach_id, answersQueries: record.answers_queries)
                     case .tabLayout(let layout):
                         // Queue these panes' output on this thread, before
                         // any redraw at the new size can reach a surface
@@ -493,6 +495,7 @@ final class HerdrController {
             controlOpened = opened
             controlOpenedAt = Date()
             capabilities = HerdrServerCapabilities(opened.capabilities)
+            router.configureQueryAuthority(enabled: capabilities.supports(.queryAuthority))
             reconnectAttempt = 0
             Self.logger.info("herdr control open: \(opened.version) boot=\(opened.boot_id) pid=\(opened.capabilities?.server_pid ?? 0) stream=\(self.capabilities.streamProtocol) features=\(self.capabilities.sortedFeatures.joined(separator: ","))")
             setUpgradePrompt(capabilities.supportsSharedViewing ? nil : .sharedViewingNeedsUpgrade)
@@ -867,6 +870,10 @@ final class HerdrController {
         for pane in layout.panes {
             if let terminalID = paneInfos[pane.pane_id]?.terminal_id {
                 paneSessions[terminalID]?.mobileReadFence = nil
+                paneSessions[terminalID]?.invalidateParserGrid()
+                if let attachID = attachIds[terminalID] {
+                    router.updateGrid(attachId: attachID, cols: 0, rows: 0)
+                }
             }
         }
         controlLayouts[layout.tab_id] = layout
@@ -875,7 +882,9 @@ final class HerdrController {
         if layoutReleases[barrier] == nil {
             router.release(barrier: barrier)
         }
-        reconcileMobileReturnToLive()
+        // Applying the layout can make an already-parsed grid ready without
+        // another size callback. Drain recovery work on this transition too.
+        requestSnapshotsForReadyPanes()
     }
 
     private func detachAllLocally() {

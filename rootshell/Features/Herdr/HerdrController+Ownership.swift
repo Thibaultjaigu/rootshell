@@ -211,26 +211,12 @@ extension HerdrController {
     /// Explicit user intent to size the tab to this window: divider drag,
     /// Fit to This Window, or Take Control on a sharing server.
     func claimGeometry(tabId: String) {
-        guard mode == .raw, let channel, capabilities.supportsSharedViewing, tabs[tabId] != nil else { return }
-        // Optimistic: the server's confirmation matches and changes nothing,
-        // so the badge and card must follow right here.
-        tabGeometryStates[tabId, default: .init()].setOwnership(.mine)
-        syncControlledElsewhereBadge(tabId: tabId)
-        publishSessionState()
+        guard mode == .raw, channel != nil, capabilities.supportsSharedViewing, tabs[tabId] != nil else { return }
+        // Send the measured size and the user's claim together, once. A
+        // separate claim RPC plus a claiming resize can undo another client's
+        // intervening handoff. Ownership changes only on the server's event.
+        tabGeometryStates[tabId, default: .init()].requestClaim()
         Self.logger.info("herdr claim geometry \(tabId)")
-        let generation = streamGeneration
-        Task { [weak self] in
-            do {
-                try await channel.request("tab.claim_geometry", HerdrControl.ClaimGeometryParams(tab_id: tabId))
-            } catch {
-                guard let self, self.streamGeneration == generation else { return }
-                Self.logger.warning("herdr tab.claim_geometry \(tabId) failed: \(error.localizedDescription)")
-                // No stored size yet: a claiming push does both.
-                if let tab = self.tabs[tabId], let view = tab.splitTree.terminalLeaves.first(where: { $0.isHerdrPane }) {
-                    self.scheduleGeometryPush(from: view)
-                }
-            }
-        }
         if let tab = tabs[tabId], let view = tab.splitTree.terminalLeaves.first(where: { $0.isHerdrPane }) {
             scheduleGeometryPush(from: view)
         }
