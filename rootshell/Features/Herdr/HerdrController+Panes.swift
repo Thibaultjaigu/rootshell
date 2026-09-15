@@ -212,7 +212,7 @@ extension HerdrController {
                 requestSnapshotsForReadyPanes()
             }
             paneDidAttach(terminalId: terminalId, tabId: tabId)
-            reconcileMobileReturnToLive()
+            reconcileReturnToLive()
         } catch {
             guard self.channel === channel, paneSessions[terminalId] === session else { return }
             Self.logger.error("herdr attach \(terminalId) failed: \(error.localizedDescription)")
@@ -375,7 +375,7 @@ extension HerdrController {
     func hostLayoutDidChange(for view: Ghostty.TerminalView) {
         if mode == .legacy, !endpointUnsupported { reconcileEndpoint(); return }
         guard mode == .raw else { return }
-        reconcileMobileActivation()
+        reconcileActivation()
         scheduleGeometryPush(from: view)
         pumpAttachQueue()
         requestSnapshotsForReadyPanes()
@@ -395,19 +395,28 @@ extension HerdrController {
         }
     }
 
+    /// Whether this tab may be sized from here right now. On a device only
+    /// the selected tab of the active window is laid out for the screen. A Mac
+    /// keeps every hosted tab measured, because a stored size (claim:false)
+    /// costs another client nothing; without shared viewing there is no such
+    /// thing as storing a size, so every push would take a tab this window is
+    /// not even showing.
+    func maySizeTab(_ tab: TabModel) -> Bool {
+        #if targetEnvironment(macCatalyst)
+        if capabilities.supportsSharedViewing { return true }
+        #endif
+        return hasProcessedInitialFocus && windowIsActive && tab.id == tabsModel.selectedTabID
+    }
+
     func scheduleGeometryPush(from view: Ghostty.TerminalView) {
-        reconcileMobileActivation()
+        reconcileActivation()
         guard let binding = view.herdrPaneBinding, let tab = tabs[binding.tabId],
               let channel, let size = tabGeometry(from: view) else { return }
         let tabId = binding.tabId
-        #if !targetEnvironment(macCatalyst)
-        if capabilities.supportsSharedViewing {
-            guard hasProcessedInitialFocus, mobileWindowIsActive, tab.id == tabsModel.selectedTabID else { return }
-        }
-        #endif
+        guard maySizeTab(tab) else { return }
         tabGeometryStates[tabId, default: .init()].update(size)
         guard geometryTasks[tabId] == nil,
-              tabGeometryStates[tabId]?.isConfirmed == false || mobileClaimGeneration(for: tabId) != nil else { return }
+              tabGeometryStates[tabId]?.isConfirmed == false || claimGeneration(for: tabId) != nil else { return }
         // A protocol 1 server always claims; only send its size when we may.
         guard capabilities.supportsSharedViewing || tabGeometryStates[tabId]?.mayClaim != false else { return }
         let generation = streamGeneration
@@ -446,20 +455,18 @@ extension HerdrController {
                       let current = self.tabGeometry(from: view) else { return }
                 self.tabGeometryStates[tabId]?.update(current)
                 if current != desired, !overdue { continue }
-                #if !targetEnvironment(macCatalyst)
-                if self.capabilities.supportsSharedViewing {
-                    guard self.mobileWindowIsActive, tab.id == self.tabsModel.selectedTabID else { return }
-                }
-                #endif
-                let activation = self.mobileClaimGeneration(for: tabId)
-                guard let request = self.tabGeometryStates[tabId]?.beginRequest(claim: activation != nil) else { return }
+                // The window may have gone quiet while this waited for the
+                // size to settle; the request must still be ours to make.
+                guard self.maySizeTab(tab) else { return }
+                let claim = self.claimGeneration(for: tabId)
+                guard let request = self.tabGeometryStates[tabId]?.beginRequest(claim: claim != nil) else { return }
                 let size = request.size
                 // While another client owns the tab this only stores our size,
                 // so the server can apply it the moment we interact.
                 let claims = request.claim
                 // Consume intent when sent. Retrying after an ambiguous
                 // response must not take the tab back from a newer owner.
-                if let activation { self.mobileActivation.claimed(generation: activation) }
+                if let claim { self.activation.claimed(generation: claim) }
                 var params = HerdrControl.TabGeometryParams(
                     tab_id: tabId, cols: size.cols, rows: size.rows,
                     cell_width_px: size.cellWidth, cell_height_px: size.cellHeight
@@ -627,7 +634,7 @@ extension HerdrController {
     }
 
     func requestSnapshotsForReadyPanes() {
-        defer { reconcileMobileReturnToLive() }
+        defer { reconcileReturnToLive() }
         for terminalId in panesNeedingSnapshot where paneGeometryIsReady(terminalId) {
             guard let attachId = attachIds[terminalId],
                   !snapshotRequestsInFlight.contains(attachId) else { continue }
@@ -638,7 +645,7 @@ extension HerdrController {
 
     /// The selected tab changed: size it and make sure its panes are attached.
     func selectedTabDidChange() {
-        reconcileMobileActivation()
+        reconcileActivation()
         if let tab = tabs.values.first(where: { $0.id == tabsModel.selectedTabID }) {
             showPanesIfSelected(in: tab)
         }

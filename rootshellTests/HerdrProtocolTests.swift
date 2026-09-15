@@ -536,10 +536,28 @@ final class HerdrProtocolTests: XCTestCase {
         XCTAssertFalse(HerdrUpgradePrompt.sharedViewingNeedsUpgrade.isHardRefusal)
         XCTAssertTrue(HerdrUpgradePrompt.versionTooOld(reported: "0.8.0").message.contains("0.8.0"))
     }
-    // MARK: Mobile activation
+    // MARK: Activation
 
-    func testMobileActivationIsOneShotUntilSelectionOrResume() {
-        var state = HerdrMobileActivation()
+    func testExpectingReturnToLiveNeverClaimsATab() {
+        var state = HerdrActivation()
+        // A handoff earned by typing: the tab is ours, nothing was asked for.
+        state.expectReturnToLive(tabID: "a", panes: ["p"])
+        XCTAssertFalse(state.needsClaim)
+        XCTAssertEqual(state.tabID, "a")
+        XCTAssertEqual(state.pendingPanes, ["p"])
+        // Panes accumulate on the same tab; a different tab starts over.
+        state.expectReturnToLive(tabID: "a", panes: ["q"])
+        XCTAssertEqual(state.pendingPanes, ["p", "q"])
+        state.expectReturnToLive(tabID: "b", panes: ["r"])
+        XCTAssertEqual(state.pendingPanes, ["r"])
+        XCTAssertFalse(state.needsClaim)
+        // It also must not consume the first real activation of that tab.
+        XCTAssertTrue(state.select("b", panes: ["r"]))
+        XCTAssertTrue(state.needsClaim)
+    }
+
+    func testActivationIsOneShotUntilSelectionOrResume() {
+        var state = HerdrActivation()
         XCTAssertTrue(state.select("a", panes: ["p", "q"]))
         let first = state.generation
         XCTAssertTrue(state.needsClaim)
@@ -559,7 +577,7 @@ final class HerdrProtocolTests: XCTestCase {
     }
 
     func testLateClaimCannotCompleteAnotherSelectionOrReconnection() {
-        var state = HerdrMobileActivation()
+        var state = HerdrActivation()
         state.select("a", panes: ["p"])
         let old = state.generation
         state.select("b", panes: ["q"])
@@ -576,7 +594,7 @@ final class HerdrProtocolTests: XCTestCase {
     }
 
     func testGatewayRestoreAndUserScrollCancellation() {
-        var state = HerdrMobileActivation()
+        var state = HerdrActivation()
         XCTAssertFalse(state.select(nil, panes: []))
         XCTAssertTrue(state.select("restored", panes: ["p", "q"]))
         // Failed claims leave intent pending; user scrolling cancels only

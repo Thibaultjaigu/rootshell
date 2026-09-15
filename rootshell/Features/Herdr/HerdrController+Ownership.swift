@@ -29,100 +29,113 @@ enum HerdrPaneControlState: Equatable {
 
 extension HerdrController {
 
-    // MARK: - Mobile activation
+    // MARK: - Activation
 
-    var mobileWindowIsActive: Bool {
+    /// This controller's tab is the focused one in the focused window. On
+    /// Catalyst the app is rarely `.background`, so the scene's activation
+    /// state and key window are what separate "frontmost" from "just open".
+    var windowIsActive: Bool {
         guard !Ghostty.isAppBackgroundedAtomic,
               let tab = tabs.values.first(where: { $0.id == tabsModel.selectedTabID }),
               let window = tab.focusedTerminal?.window ?? tab.splitTree.terminalLeaves.first?.window else { return false }
         return window.isKeyWindow && window.windowScene?.activationState == .foregroundActive
     }
 
-    func suspendMobileActivation() {
-        #if !targetEnvironment(macCatalyst)
-        mobileActivation.suspend()
-        for session in paneSessions.values { session.mobileReadFence = nil }
-        #endif
+    func suspendActivation() {
+        activation.suspend()
+        for session in paneSessions.values { session.readFence = nil }
     }
 
     /// Called from selection and layout readiness, but only selection or a
     /// foreground/reconnect edge creates intent. Remote layouts cannot renew it.
-    func reconcileMobileActivation() {
-        #if !targetEnvironment(macCatalyst)
+    func reconcileActivation() {
         guard !didEnd, mode == .raw, isActive, hasProcessedInitialFocus, capabilities.supportsSharedViewing else { return }
         guard let tab = tabs.values.first(where: { $0.id == tabsModel.selectedTabID }) else {
-            mobileActivation.select(nil, panes: [])
+            activation.select(nil, panes: [])
             return
         }
-        guard mobileWindowIsActive, let tabID = tab.herdrTabId else { return }
-        mobileScene = (tab.focusedTerminal?.window ?? tab.splitTree.terminalLeaves.first?.window)?.windowScene
+        guard windowIsActive, let tabID = tab.herdrTabId else { return }
+        activationScene = (tab.focusedTerminal?.window ?? tab.splitTree.terminalLeaves.first?.window)?.windowScene
         let visibleTree = SplitTree<SplitPaneView>(root: tab.splitTree.zoomed ?? tab.splitTree.root, zoomed: nil)
         let visiblePanes = visibleTree.terminalLeaves.filter { $0.isHerdrPane }
         let terminalIDs = Set(visiblePanes.compactMap { $0.herdrPaneBinding?.terminalId })
         guard !terminalIDs.isEmpty else { return }
-        guard mobileActivation.select(tabID, panes: terminalIDs) else { return }
-        for session in paneSessions.values { session.mobileReadFence = nil }
+        guard activation.select(tabID, panes: terminalIDs) else { return }
+        for session in paneSessions.values { session.readFence = nil }
         // Even a previously confirmed size must carry this new claim.
         tabGeometryStates[tabID, default: .init()].invalidate()
         for view in visiblePanes {
             view.prepareHerdrReturnToLive()
         }
-        #endif
     }
 
-    func mobileClaimGeneration(for tabID: String) -> UUID? {
-        #if !targetEnvironment(macCatalyst)
-        guard mobileWindowIsActive, mobileActivation.tabID == tabID,
-              mobileActivation.needsClaim else { return nil }
-        return mobileActivation.generation
-        #else
-        return nil
-        #endif
+    /// The tab is ours again, which on a server that hands tabs over on
+    /// interaction can be the work of a single keystroke: the resize and the
+    /// replay that follow would otherwise leave the viewport wherever the
+    /// rebuild put it, until the next key scrolled it down. No claim is made
+    /// here; we already have the tab.
+    func expectReturnToLive(tabId: String) {
+        guard !didEnd, mode == .raw, isActive, capabilities.supportsSharedViewing, windowIsActive,
+              let tab = tabs[tabId], tab.id == tabsModel.selectedTabID else { return }
+        let visibleTree = SplitTree<SplitPaneView>(root: tab.splitTree.zoomed ?? tab.splitTree.root, zoomed: nil)
+        let visiblePanes = visibleTree.terminalLeaves.filter { $0.isHerdrPane }
+        let terminalIDs = Set(visiblePanes.compactMap { $0.herdrPaneBinding?.terminalId })
+        guard !terminalIDs.isEmpty else { return }
+        activation.expectReturnToLive(tabID: tabId, panes: terminalIDs)
+        for view in visiblePanes where !view.isActivelySelecting {
+            view.prepareHerdrReturnToLive()
+        }
     }
 
-    func cancelMobileReturnToLive(terminalID: String) {
-        mobileActivation.finishPane(terminalID)
-        paneSessions[terminalID]?.mobileReadFence = nil
+    func claimGeneration(for tabID: String) -> UUID? {
+        guard windowIsActive, activation.tabID == tabID, activation.needsClaim else { return nil }
+        return activation.generation
+    }
+
+    func cancelReturnToLive(terminalID: String) {
+        activation.finishPane(terminalID)
+        paneSessions[terminalID]?.readFence = nil
+    }
+
+    /// This pane owes the activation a jump back to live output.
+    func isReturningToLive(terminalID: String) -> Bool {
+        activation.pendingPanes.contains(terminalID)
     }
 
     /// Queue the acknowledgement after replay and all output already received.
     /// A snapshot replacement changes the revision and invalidates old replies.
-    func reconcileMobileReturnToLive() {
-        #if !targetEnvironment(macCatalyst)
-        guard !didEnd, isActive, capabilities.supportsSharedViewing, mobileWindowIsActive,
-              !mobileActivation.needsClaim, let tabID = mobileActivation.tabID,
+    func reconcileReturnToLive() {
+        guard !didEnd, isActive, capabilities.supportsSharedViewing, windowIsActive,
+              !activation.needsClaim, let tabID = activation.tabID,
               tabs[tabID]?.id == tabsModel.selectedTabID,
               !layoutReleases.values.contains(where: { $0.tabId == tabID }) else { return }
-        for terminalID in mobileActivation.pendingPanes {
+        for terminalID in activation.pendingPanes {
             guard let session = paneSessions[terminalID], let attachID = session.attachId,
                   paneGeometryIsReady(terminalID), !panesNeedingSnapshot.contains(terminalID),
                   !snapshotRequestsInFlight.contains(attachID),
                   let revision = router.snapshotRevision(attachId: attachID) else { continue }
-            if session.mobileReadFence?.snapshot == revision { continue }
-            session.requestMobileReadFence(generation: mobileActivation.generation, snapshot: revision)
+            if session.readFence?.snapshot == revision { continue }
+            session.requestReadFence(generation: activation.generation, snapshot: revision)
         }
-        #endif
     }
 
-    func mobileParserDidDrain(_ session: HerdrPaneSession, fence: HerdrPaneSession.MobileReadFence) {
-        #if !targetEnvironment(macCatalyst)
-        guard !didEnd, mobileWindowIsActive, !mobileActivation.needsClaim,
+    func parserDidDrain(_ session: HerdrPaneSession, fence: HerdrPaneSession.ReadFence) {
+        guard !didEnd, windowIsActive, !activation.needsClaim,
               paneSessions[session.terminalId] === session,
-              mobileActivation.generation == fence.generation,
-              mobileActivation.pendingPanes.contains(session.terminalId),
+              activation.generation == fence.generation,
+              activation.pendingPanes.contains(session.terminalId),
               isVisible(terminalId: session.terminalId), let attachID = session.attachId,
               router.snapshotRevision(attachId: attachID) == fence.snapshot,
               paneGeometryIsReady(session.terminalId),
               !panesNeedingSnapshot.contains(session.terminalId),
               !snapshotRequestsInFlight.contains(attachID),
-              !layoutReleases.values.contains(where: { $0.tabId == mobileActivation.tabID }),
+              !layoutReleases.values.contains(where: { $0.tabId == activation.tabID }),
               let view = paneViews[session.terminalId],
-              let tabID = mobileActivation.tabID, let tab = tabs[tabID],
+              let tabID = activation.tabID, let tab = tabs[tabID],
               (tab.splitTree.zoomed ?? tab.splitTree.root)?.node(view: view) != nil else { return }
-        mobileActivation.finishPane(session.terminalId)
+        activation.finishPane(session.terminalId)
         guard !view.isActivelySelecting else { return }
         view.finishHerdrReturnToLive()
-        #endif
     }
 
     // MARK: - Geometry ownership (protocol 2)
@@ -152,6 +165,7 @@ extension HerdrController {
         }
         guard tabGeometryStates[tabId, default: .init()].setOwnership(ownership) else { return }
         Self.logger.info("herdr tab \(tabId) geometry owner -> \(String(describing: ownership))")
+        if ownership == .mine { expectReturnToLive(tabId: tabId) }
         // A hand-off to us applied our stored size already; do not re-send it.
         if ownership == .mine, let layout = controlLayouts[tabId],
            let desired = tabGeometryStates[tabId]?.desired,
@@ -316,6 +330,23 @@ extension HerdrController {
             enqueueAttach(pane.terminal_id, front: isVisible(terminalId: pane.terminal_id))
         }
         pumpAttachQueue()
+    }
+
+    /// What tmux's `detach-client -a` maps to here. herdr has no method to
+    /// close another client's connection, and shared viewing is the point of
+    /// protocol 2, so this takes the whole session instead of emptying it:
+    /// every tab's geometry, and every pane another client holds. Viewers
+    /// stay attached; nothing else decides how this session is laid out.
+    /// A tab with no size on this device yet keeps the claim pending until
+    /// it is shown, rather than taking it at a size measured elsewhere.
+    @discardableResult
+    func takeControlOfSession() -> Bool {
+        guard !didEnd, mode == .raw, channel != nil, !tabs.isEmpty else { return false }
+        Self.logger.info("herdr take control of session: \(self.tabs.count) tabs")
+        for tabId in tabs.keys {
+            requestTakeControl(tabId: tabId)
+        }
+        return true
     }
 
     private func syncControlledElsewhereBadge(tabId: String) {

@@ -262,33 +262,48 @@ nonisolated struct HerdrTabGeometryState {
     }
 }
 
-/// A mobile activation is an edge, never a standing claim on a shared tab.
-/// Kept separate from layout negotiation so remote ownership changes cannot
+/// An activation is an edge, never a standing claim on a shared tab. Kept
+/// separate from layout negotiation so remote ownership changes cannot
 /// manufacture another activation.
-nonisolated struct HerdrMobileActivation {
+nonisolated struct HerdrActivation {
     private(set) var tabID: String?
     private(set) var generation = UUID()
     private(set) var needsClaim = false
     private(set) var pendingPanes: Set<String> = []
-    private var needsForegroundActivation = true
+    private var needsActivationEdge = true
 
     @discardableResult
     mutating func select(_ tabID: String?, panes: Set<String>) -> Bool {
-        guard tabID != self.tabID || needsForegroundActivation else { return false }
+        guard tabID != self.tabID || needsActivationEdge else { return false }
         self.tabID = tabID
         generation = UUID()
         needsClaim = tabID != nil
         pendingPanes = tabID == nil ? [] : panes
         // A gateway can be selected before its recovered terminal exists.
-        needsForegroundActivation = tabID == nil
+        needsActivationEdge = tabID == nil
         return tabID != nil
     }
 
     mutating func suspend() {
         generation = UUID()
-        needsForegroundActivation = true
+        needsActivationEdge = true
         needsClaim = false
         pendingPanes.removeAll()
+    }
+
+    /// Expect these panes to return to live output on a tab that is already
+    /// ours, without asking for the tab again. The server hands a tab over on
+    /// interaction, so a keystroke can bring a resize and a replay with no
+    /// activation edge anywhere in sight. Claiming intent is untouched: this
+    /// never takes a tab, it only follows one we were just given.
+    mutating func expectReturnToLive(tabID: String, panes: Set<String>) {
+        if self.tabID != tabID {
+            self.tabID = tabID
+            generation = UUID()
+            needsClaim = false
+            pendingPanes = []
+        }
+        pendingPanes.formUnion(panes)
     }
 
     mutating func claimed(generation: UUID) {
