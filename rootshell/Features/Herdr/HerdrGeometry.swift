@@ -190,6 +190,10 @@ nonisolated struct HerdrTabGeometryState {
         desired != nil && desired == confirmed && inFlight == nil && !claimPending
     }
 
+    /// The user asked for this tab and the request has not gone out yet.
+    /// One-shot: `beginRequest` consumes it, so a push re-gates on the next pass.
+    var hasPendingClaim: Bool { claimPending }
+
     /// Whether the legacy protocol may push a size (it cannot store without
     /// claiming). Shared-mode requests carry their own one-shot claim flag.
     var mayClaim: Bool {

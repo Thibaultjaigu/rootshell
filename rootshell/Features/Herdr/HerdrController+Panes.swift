@@ -392,20 +392,23 @@ extension HerdrController {
         }
     }
 
-    private func geometryView(in tab: TabModel) -> Ghostty.TerminalView? {
+    func geometryView(in tab: TabModel) -> Ghostty.TerminalView? {
         tab.splitTree.terminalLeaves.first {
             $0.enclosingSplitHost?.hasLaidOutHerdrPane($0) == true
         }
     }
 
-    /// Whether this tab may be sized from here right now. A device lays out
-    /// only the selected tab; a Mac measures them all, except on a server
-    /// with no stored size, where every push would take the tab.
-    func maySizeTab(_ tab: TabModel) -> Bool {
+    /// Whether this tab may be sized from here right now. A device sizes only
+    /// the tab it is showing, so it never fights the owner over the rest; a Mac
+    /// measures them all, except on a server with no stored size, where every
+    /// push would take the tab. `claiming` is the user naming this tab
+    /// explicitly (Take Control), which reaches tabs shown here or not.
+    func maySizeTab(_ tab: TabModel, claiming: Bool = false) -> Bool {
         #if targetEnvironment(macCatalyst)
         if capabilities.supportsSharedViewing { return true }
         #endif
-        return hasProcessedInitialFocus && windowIsActive && tab.id == tabsModel.selectedTabID
+        return hasProcessedInitialFocus && windowIsActive
+            && (claiming || tab.id == tabsModel.selectedTabID)
     }
 
     func scheduleGeometryPush(from view: Ghostty.TerminalView) {
@@ -413,7 +416,7 @@ extension HerdrController {
         guard let binding = view.herdrPaneBinding, let tab = tabs[binding.tabId],
               let channel, let size = tabGeometry(from: view) else { return }
         let tabId = binding.tabId
-        guard maySizeTab(tab) else { return }
+        guard maySizeTab(tab, claiming: tabGeometryStates[tabId]?.hasPendingClaim == true) else { return }
         tabGeometryStates[tabId, default: .init()].update(size)
         guard geometryTasks[tabId] == nil,
               tabGeometryStates[tabId]?.isConfirmed == false || claimGeneration(for: tabId) != nil else { return }
@@ -457,7 +460,11 @@ extension HerdrController {
                 if current != desired, !overdue { continue }
                 // The window may have gone quiet while this waited for the
                 // size to settle; the request must still be ours to make.
-                guard self.maySizeTab(tab) else { return }
+                // Re-read the claim: another push may have consumed it while
+                // this awaited, and only a live claim reaches an unshown tab.
+                guard self.maySizeTab(
+                    tab, claiming: self.tabGeometryStates[tabId]?.hasPendingClaim == true
+                ) else { return }
                 let claim = self.claimGeneration(for: tabId)
                 guard let request = self.tabGeometryStates[tabId]?.beginRequest(claim: claim != nil) else { return }
                 let size = request.size

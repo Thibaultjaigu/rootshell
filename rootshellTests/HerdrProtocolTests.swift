@@ -414,6 +414,21 @@ final class HerdrProtocolTests: XCTestCase {
         XCTAssertNotNil(state.beginRequest())
     }
 
+    /// `hasPendingClaim` is what lets a Take Control claim size a tab this
+    /// window is not showing, so it must not outlive the one request it arms.
+    func testPendingClaimIsVisibleUntilTheRequestGoesOut() throws {
+        var state = HerdrTabGeometryState()
+        state.update(size)
+        XCTAssertFalse(state.hasPendingClaim)
+        state.requestClaim()
+        XCTAssertTrue(state.hasPendingClaim)
+        let request = try XCTUnwrap(state.beginRequest())
+        XCTAssertTrue(request.claim)
+        XCTAssertFalse(state.hasPendingClaim)
+        state.finish(request, succeeded: false)
+        XCTAssertFalse(state.hasPendingClaim)
+    }
+
     // MARK: Reply classification
 
     func testRoutineResizeCannotReclaimWithStaleOwnership() throws {

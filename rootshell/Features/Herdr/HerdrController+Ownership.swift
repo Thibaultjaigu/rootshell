@@ -230,7 +230,11 @@ extension HerdrController {
         // intervening handoff. Ownership changes only on the server's event.
         tabGeometryStates[tabId, default: .init()].requestClaim()
         Self.logger.info("herdr claim geometry \(tabId)")
-        if let tab = tabs[tabId], let view = tab.splitTree.terminalLeaves.first(where: { $0.isHerdrPane }) {
+        // Only a hosted leaf can be measured: in a zoomed tab the first herdr
+        // leaf may not be the one the split host has attached.
+        if let tab = tabs[tabId],
+           let view = geometryView(in: tab)
+            ?? tab.splitTree.terminalLeaves.first(where: { $0.isHerdrPane }) {
             scheduleGeometryPush(from: view)
         }
     }
@@ -333,12 +337,15 @@ extension HerdrController {
 
     /// What tmux's `detach-client -a` maps to here: herdr cannot close
     /// another client's connection, so take every tab's geometry and every
-    /// pane another client holds. A tab with no size here yet claims later.
+    /// pane another client holds, including the tabs this window is not
+    /// showing. The tab in front goes first so it lands before the rest.
     @discardableResult
     func takeControlOfSession() -> Bool {
         guard !didEnd, mode == .raw, channel != nil, !tabs.isEmpty else { return false }
         Self.logger.info("herdr take control of session: \(self.tabs.count) tabs")
-        for tabId in tabs.keys {
+        let selectedTabId = tabs.first { $0.value.id == tabsModel.selectedTabID }?.key
+        let ordered = (selectedTabId.map { [$0] } ?? []) + tabs.keys.filter { $0 != selectedTabId }
+        for tabId in ordered {
             requestTakeControl(tabId: tabId)
         }
         return true
