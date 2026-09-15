@@ -22,6 +22,18 @@ import UIKit
 /// - Session persistence and resume
 /// - Network roaming support
 @MainActor
+private struct WeakTrzszSession {
+    weak var session: TrzszSession?
+}
+
+/// Completion count for the termination sweep, readable while the main run
+/// loop turns.
+@MainActor
+private final class TerminationProgress {
+    var finished = 0
+}
+
+@MainActor
 final class TrzszSession: TerminalSession {
 
     // MARK: - TerminalSession Protocol
@@ -329,8 +341,11 @@ final class TrzszSession: TerminalSession {
             throw TrzszError.connectionFailed("No transport for exec channel")
         }
         let pipe = try await goTransport.openExecChannel(command)
-        if let id = (pipe as? TrzszExecPipe)?.remoteSessionID {
+        if let exec = pipe as? TrzszExecPipe, let id = exec.remoteSessionID {
             noteAuxiliarySession(id: id)
+            exec.onRemoteSessionEnded = { [weak self] ended in
+                Task { @MainActor in self?.forgetAuxiliarySession(id: ended) }
+            }
         }
         return pipe
     }
@@ -339,7 +354,14 @@ final class TrzszSession: TerminalSession {
         guard let goTransport else {
             throw TrzszError.connectionFailed("No transport for auxiliary PTY")
         }
-        return try await goTransport.openPTYChannel(command, cols: cols, rows: rows)
+        let channel = try await goTransport.openPTYChannel(command, cols: cols, rows: rows)
+        if let pty = channel as? HerdrTSSHPTYChannel, let id = pty.remoteSessionID {
+            noteAuxiliarySession(id: id)
+            await pty.setRemoteSessionEndedHandler { [weak self] ended in
+                Task { @MainActor in self?.forgetAuxiliarySession(id: ended) }
+            }
+        }
+        return channel
     }
 
     /// SSH client kept alive during QUIC establishment
@@ -514,6 +536,7 @@ final class TrzszSession: TerminalSession {
         self.pty = pty
         self.terminalId = terminalId
         wireEscapeFilter()
+        Self.track(self)
     }
 
     private func wireEscapeFilter() {
@@ -2215,15 +2238,13 @@ extension TrzszSession {
         savedCredentials?.sessionID
     }
 
-    /// At most this many auxiliary ids are carried; a run that reconnects
-    /// often would otherwise grow the record without bound. Oldest go first:
-    /// a session that outlived several reconnects is the least likely to
-    /// still exist, and reaping is best-effort either way.
-    private static let maxAuxiliarySessionIDs = 16
+    /// Backstop against a record growing forever because closes stopped
+    /// arriving. Ids are pruned as their channels close, so reaching this
+    /// means something is already wrong.
+    private static let maxAuxiliarySessionIDs = 256
 
-    /// Remembers an auxiliary session so a later run can end it. Persisted
-    /// immediately: the point is to survive a force quit, which gives no
-    /// chance to write anything.
+    /// Remembers an auxiliary session so a later run can end it. Persisted at
+    /// once: a force quit gives no chance to write anything.
     private func noteAuxiliarySession(id: UInt64) {
         guard var credentials = savedCredentials else { return }
         var ids = credentials.auxiliarySessionIDs ?? []
@@ -2236,35 +2257,84 @@ extension TrzszSession {
         persist(credentials, reason: "aux session \(id)")
     }
 
-    /// Ends the auxiliary sessions a previous run left behind, then forgets
-    /// them. Called once the transport is up, before anything new is opened.
-    /// An id whose session is already gone is ignored by the server, so this
-    /// never needs to know which of them actually survived.
-    private func reapAbandonedAuxiliarySessions() async {
+    /// The channel closed, so its process went with it.
+    private func forgetAuxiliarySession(id: UInt64) {
         guard var credentials = savedCredentials,
-              let ids = credentials.auxiliarySessionIDs, !ids.isEmpty,
+              let ids = credentials.auxiliarySessionIDs, ids.contains(id) else { return }
+        credentials.auxiliarySessionIDs = ids.filter { $0 != id }
+        persist(credentials, reason: "aux session \(id) closed")
+    }
+
+    /// Asks the server to end the auxiliary sessions recorded here. An exit is
+    /// never acknowledged, so this forgets nothing: ids leave the record when
+    /// a channel reports a real exit, or when a new server replaces them.
+    private func endAuxiliarySessions(reason: String) async {
+        guard let ids = savedCredentials?.auxiliarySessionIDs, !ids.isEmpty,
               let goTransport else { return }
         for id in ids {
             do {
                 try await goTransport.exitSession(sessionID: id)
-                ResumeDebugLogger.shared.log("[\(debugPrefix)] ended abandoned aux session \(id)")
+                ResumeDebugLogger.shared.log("[\(debugPrefix)] asked to end aux session \(id) (\(reason))")
             } catch {
                 ResumeDebugLogger.shared.log(
                     "[\(debugPrefix)] could not end aux session \(id): \(error.localizedDescription)"
                 )
             }
         }
-        credentials.auxiliarySessionIDs = []
-        persist(credentials, reason: "reaped \(ids.count) aux session(s)")
+    }
+
+    /// Called once the transport is up, before anything new is opened.
+    private func reapAbandonedAuxiliarySessions() async {
+        await endAuxiliarySessions(reason: "abandoned by an earlier run")
+    }
+
+    // MARK: - Auxiliary channels at termination
+
+    /// Live sessions, so a quit can end their auxiliary channels.
+    private static var liveSessions: [WeakTrzszSession] = []
+    private static var terminateObserver: NSObjectProtocol?
+
+    private static func track(_ session: TrzszSession) {
+        liveSessions.removeAll { $0.session == nil }
+        liveSessions.append(WeakTrzszSession(session: session))
+        guard terminateObserver == nil else { return }
+        terminateObserver = NotificationCenter.default.addObserver(
+            forName: UIApplication.willTerminateNotification, object: nil, queue: .main
+        ) { _ in
+            MainActor.assumeIsolated { endAuxiliaryChannelsForTermination() }
+        }
+    }
+
+    /// An attachable server keeps a departed client's sessions running, so
+    /// end ours on the way out. Ids stay recorded, leaving the reap on the
+    /// next resume as the backstop for whatever this misses.
+    static func endAuxiliaryChannelsForTermination() {
+        let sessions = liveSessions.compactMap(\.session).filter {
+            $0.savedCredentials?.auxiliarySessionIDs?.isEmpty == false
+        }
+        guard !sessions.isEmpty else { return }
+        let progress = TerminationProgress()
+        for session in sessions {
+            Task { @MainActor in
+                await session.endAuxiliarySessions(reason: "app terminating")
+                progress.finished += 1
+            }
+        }
+        // Run the loop rather than block it: the work ahead of these calls is
+        // main-actor bound. Quitting never waits longer than this.
+        let deadline = Date().addingTimeInterval(1.5)
+        while progress.finished < sessions.count, Date() < deadline {
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
+        }
     }
 
     private func persist(_ credentials: TrzszSessionCredentials, reason: String) {
         savedCredentials = credentials
+        // The session's own terminal id is the persistence key: after a
+        // Continuity transfer the credentials still carry the sender's.
+        guard let key = terminalId else { return }
         do {
-            try KeychainManager.shared.saveTrzszSessionCredentials(
-                credentials,
-                terminalId: credentials.terminalId
-            )
+            try KeychainManager.shared.saveTrzszSessionCredentials(credentials, terminalId: key)
         } catch {
             Self.logger.warning("Failed to persist credentials (\(reason)): \(error.localizedDescription)")
         }
