@@ -328,7 +328,11 @@ final class TrzszSession: TerminalSession {
         guard let goTransport else {
             throw TrzszError.connectionFailed("No transport for exec channel")
         }
-        return try await goTransport.openExecChannel(command)
+        let pipe = try await goTransport.openExecChannel(command)
+        if let id = (pipe as? TrzszExecPipe)?.remoteSessionID {
+            noteAuxiliarySession(id: id)
+        }
+        return pipe
     }
 
     func openPTYChannel(_ command: String, cols: Int, rows: Int) async throws -> HerdrPTYChannel {
@@ -924,6 +928,12 @@ final class TrzszSession: TerminalSession {
                     terminalId: terminalId
                 )
                 savedCredentials = updatedCredentials
+
+                // Whatever this session's previous run left running: the
+                // shell came back through Attach above, but an auxiliary
+                // channel has no such path and would linger for the life of
+                // the server.
+                await reapAbandonedAuxiliarySessions()
 
                 await startConfiguredPortForwards(on: transport)
                 try Task.checkCancellation()
@@ -2203,6 +2213,61 @@ extension TrzszSession {
     /// can decide whether transfer is even possible.
     var transferableSessionID: UInt64? {
         savedCredentials?.sessionID
+    }
+
+    /// At most this many auxiliary ids are carried; a run that reconnects
+    /// often would otherwise grow the record without bound. Oldest go first:
+    /// a session that outlived several reconnects is the least likely to
+    /// still exist, and reaping is best-effort either way.
+    private static let maxAuxiliarySessionIDs = 16
+
+    /// Remembers an auxiliary session so a later run can end it. Persisted
+    /// immediately: the point is to survive a force quit, which gives no
+    /// chance to write anything.
+    private func noteAuxiliarySession(id: UInt64) {
+        guard var credentials = savedCredentials else { return }
+        var ids = credentials.auxiliarySessionIDs ?? []
+        guard !ids.contains(id) else { return }
+        ids.append(id)
+        if ids.count > Self.maxAuxiliarySessionIDs {
+            ids.removeFirst(ids.count - Self.maxAuxiliarySessionIDs)
+        }
+        credentials.auxiliarySessionIDs = ids
+        persist(credentials, reason: "aux session \(id)")
+    }
+
+    /// Ends the auxiliary sessions a previous run left behind, then forgets
+    /// them. Called once the transport is up, before anything new is opened.
+    /// An id whose session is already gone is ignored by the server, so this
+    /// never needs to know which of them actually survived.
+    private func reapAbandonedAuxiliarySessions() async {
+        guard var credentials = savedCredentials,
+              let ids = credentials.auxiliarySessionIDs, !ids.isEmpty,
+              let goTransport else { return }
+        for id in ids {
+            do {
+                try await goTransport.exitSession(sessionID: id)
+                ResumeDebugLogger.shared.log("[\(debugPrefix)] ended abandoned aux session \(id)")
+            } catch {
+                ResumeDebugLogger.shared.log(
+                    "[\(debugPrefix)] could not end aux session \(id): \(error.localizedDescription)"
+                )
+            }
+        }
+        credentials.auxiliarySessionIDs = []
+        persist(credentials, reason: "reaped \(ids.count) aux session(s)")
+    }
+
+    private func persist(_ credentials: TrzszSessionCredentials, reason: String) {
+        savedCredentials = credentials
+        do {
+            try KeychainManager.shared.saveTrzszSessionCredentials(
+                credentials,
+                terminalId: credentials.terminalId
+            )
+        } catch {
+            Self.logger.warning("Failed to persist credentials (\(reason)): \(error.localizedDescription)")
+        }
     }
 
     /// Constructs a TrzszSession by attaching directly to a server-side PTY

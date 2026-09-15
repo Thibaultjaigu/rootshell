@@ -15,10 +15,14 @@ nonisolated final class TrzszExecPipe: AsyncBytePipe, @unchecked Sendable {
 
     private let channelRef: Int64
     private let transportRef: TSSHTransportRef
+    /// The server's id for this channel's session, when it has one. Saved by
+    /// the session so a later run can end a channel this one leaves behind.
+    let remoteSessionID: UInt64?
 
-    init(channelRef: Int64, transportRef: TSSHTransportRef) {
+    init(channelRef: Int64, transportRef: TSSHTransportRef, remoteSessionID: UInt64? = nil) {
         self.channelRef = channelRef
         self.transportRef = transportRef
+        self.remoteSessionID = remoteSessionID
     }
 
     func read(maxBytes: Int) async throws -> Data? {
