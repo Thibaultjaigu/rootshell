@@ -201,3 +201,42 @@ nonisolated struct HerdrTabGeometryState {
         return true
     }
 }
+
+/// A mobile activation is an edge, never a standing claim on a shared tab.
+/// Kept separate from layout negotiation so remote ownership changes cannot
+/// manufacture another activation.
+nonisolated struct HerdrMobileActivation {
+    private(set) var tabID: String?
+    private(set) var generation = UUID()
+    private(set) var needsClaim = false
+    private(set) var pendingPanes: Set<String> = []
+    private var needsForegroundActivation = true
+
+    @discardableResult
+    mutating func select(_ tabID: String?, panes: Set<String>) -> Bool {
+        guard tabID != self.tabID || needsForegroundActivation else { return false }
+        self.tabID = tabID
+        generation = UUID()
+        needsClaim = tabID != nil
+        pendingPanes = tabID == nil ? [] : panes
+        // A gateway can be selected before its recovered terminal exists.
+        needsForegroundActivation = tabID == nil
+        return tabID != nil
+    }
+
+    mutating func suspend() {
+        generation = UUID()
+        needsForegroundActivation = true
+        needsClaim = false
+        pendingPanes.removeAll()
+    }
+
+    mutating func claimed(generation: UUID) {
+        guard self.generation == generation else { return }
+        needsClaim = false
+    }
+
+    mutating func finishPane(_ terminalID: String) {
+        pendingPanes.remove(terminalID)
+    }
+}

@@ -29,6 +29,8 @@ Fallback is not simply a screenshot poller: the normal upstream endpoint keeps f
 
 Shared viewing does not give every client a separately sized copy of the same terminal. One client controls a tab's geometry; other viewers follow that layout. The **Take Control** and **Fit to This Window** actions allow an explicit change of owner. On older single-owner forks, taking control can displace the previous attach.
 
+On iPhone, iPad, and visionOS, opening or returning to the app, or selecting a terminal tab, automatically fits the selected tab to that device and returns its visible panes to live output. No typing is needed. Other clients stay attached. Each activation claims once; a later handoff to another client does not start a contest for control. Scrolling or selecting text cancels a pending return to live output for that pane. Mac Catalyst keeps its existing interaction and explicit-control behavior.
+
 ## Install the optional fork
 
 Run this on the **macOS or Linux host running herdr**, which may be a remote SSH/tssh host or your local Mac:

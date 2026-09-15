@@ -97,3 +97,62 @@ nonisolated enum HerdrReplyFilter {
         return nil
     }
 }
+
+/// Local DECRQM probes acknowledge that the parser reached a point in the
+/// output stream. Unknown private modes are read-only and echo the mode
+/// number, unlike an untagged DSR reply that could acknowledge an old probe.
+/// Replies are consumed here even after cancellation; they never reach herdr.
+nonisolated struct HerdrParserFence {
+    // Ghostty stores private mode numbers in 15 bits.
+    private var nextID = 16_000
+    private var issued: Set<Int> = []
+    private var carry = Data()
+
+    mutating func issue() -> (id: Int, bytes: Data)? {
+        // Never reuse a number on a surface: a delayed reply must not satisfy
+        // a later request. Exhaustion simply leaves the viewport alone.
+        guard nextID <= 32_767 else { return nil }
+        let id = nextID
+        nextID += 1
+        issued.insert(id)
+        return (id, Data("\u{1b}[?\(id)$p".utf8))
+    }
+
+    mutating func consume(_ data: Data) -> (forward: Data, acknowledged: [Int]) {
+        guard !issued.isEmpty || !carry.isEmpty else { return (data, []) }
+        let bytes = Array(carry + data)
+        carry.removeAll(keepingCapacity: true)
+        var forward = Data()
+        var acknowledged: [Int] = []
+        var i = 0
+        while i < bytes.count {
+            let start = i
+            guard bytes[i] == 0x1b else { forward.append(bytes[i]); i += 1; continue }
+            let prefix: [UInt8] = [0x1b, 0x5b, 0x3f]
+            var j = 0
+            while j < prefix.count, i + j < bytes.count, bytes[i + j] == prefix[j] { j += 1 }
+            if i + j == bytes.count, j < prefix.count {
+                carry.append(contentsOf: bytes[start...]); break
+            }
+            guard j == prefix.count else { forward.append(bytes[i]); i += 1; continue }
+            i += j
+            while i < bytes.count, (0x30...0x39).contains(bytes[i]), i - start < 10 { i += 1 }
+            let numberEnd = i
+            let suffix: [UInt8] = [0x3b, 0x30, 0x24, 0x79] // ;0$y
+            j = 0
+            while j < suffix.count, i + j < bytes.count, bytes[i + j] == suffix[j] { j += 1 }
+            if i + j == bytes.count, j < suffix.count, i - start < 10 {
+                carry.append(contentsOf: bytes[start...]); break
+            }
+            if j == suffix.count,
+               let id = Int(String(decoding: bytes[(start + 3)..<numberEnd], as: UTF8.self)),
+               issued.remove(id) != nil {
+                acknowledged.append(id)
+                i += j
+            } else {
+                forward.append(contentsOf: bytes[start..<i])
+            }
+        }
+        return (forward, acknowledged)
+    }
+}

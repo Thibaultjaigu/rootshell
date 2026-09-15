@@ -41,6 +41,7 @@ nonisolated final class HerdrOutputRouter: @unchecked Sendable {
     private let lock = UnfairLock()
     private var sinks: [String: OutputSink] = [:]
     private var grids: [String: (cols: Int, rows: Int)] = [:]
+    private var snapshotRevisions: [String: UUID] = [:]
     /// Per attach, the escape or UTF-8 sequence the last emitted chunk ended
     /// inside. herdr forwards raw PTY reads, so a sequence can straddle two
     /// records; Ghostty only ever receives whole ones.
@@ -77,6 +78,7 @@ nonisolated final class HerdrOutputRouter: @unchecked Sendable {
         lock.withLock {
             _ = sinks.removeValue(forKey: attachId)
             grids.removeValue(forKey: attachId)
+            snapshotRevisions.removeValue(forKey: attachId)
             carries.removeValue(forKey: attachId)
             if let dropped = queues.removeValue(forKey: attachId) {
                 queuedBytes -= dropped.reduce(0) { $0 + $1.byteCount }
@@ -100,6 +102,7 @@ nonisolated final class HerdrOutputRouter: @unchecked Sendable {
                 guard queue.contains(where: { if case .barrier(let b) = $0 { return b == id } else { return false } })
                 else { continue }
                 overflowed.insert(attachId)
+                snapshotRevisions.removeValue(forKey: attachId)
                 dropQueue(attachId)
                 touched.append(attachId)
             }
@@ -111,6 +114,7 @@ nonisolated final class HerdrOutputRouter: @unchecked Sendable {
         lock.withLock {
             sinks.removeAll()
             grids.removeAll()
+            snapshotRevisions.removeAll()
             carries.removeAll()
             queues.removeAll()
             queuedBytes = 0
@@ -146,6 +150,7 @@ nonisolated final class HerdrOutputRouter: @unchecked Sendable {
     func invalidate(attachId: String) {
         lock.withLock {
             overflowed.insert(attachId)
+            snapshotRevisions.removeValue(forKey: attachId)
             dropQueue(attachId)
         }
     }
@@ -203,12 +208,14 @@ nonisolated final class HerdrOutputRouter: @unchecked Sendable {
             // had queued, and it is the only thing that can end an overflow.
             // It may exceed the shared budget briefly; the server caps it.
             if isSnapshot {
+                snapshotRevisions[attachId] = UUID()
                 dropQueue(attachId)
             } else if queuedBytes + item.byteCount > Self.maxQueuedBytes {
                 // Over budget: this attach's backlog is now incomplete, so
                 // discard it all and recover from a fresh snapshot.
                 dropQueue(attachId)
                 overflowed.insert(attachId)
+                snapshotRevisions.removeValue(forKey: attachId)
                 overflowNow = true
                 return
             }
@@ -294,6 +301,23 @@ nonisolated final class HerdrOutputRouter: @unchecked Sendable {
         let queued: Bool = lock.withLock {
             guard sinks[attachId] != nil else { return false }
             queues[attachId, default: []].insert(.control(bytes), at: 0)
+            queuedBytes += bytes.count
+            return true
+        }
+        if queued { flush(attachId) }
+        return queued
+    }
+
+    func snapshotRevision(attachId: String) -> UUID? {
+        lock.withLock { snapshotRevisions[attachId] }
+    }
+
+    /// Unlike a resize probe, this must remain behind snapshots and barriers.
+    /// Reject a revision replaced between the main-actor check and enqueue.
+    func enqueueReadFence(attachId: String, snapshot: UUID, bytes: Data) -> Bool {
+        let queued = lock.withLock {
+            guard sinks[attachId] != nil, snapshotRevisions[attachId] == snapshot else { return false }
+            queues[attachId, default: []].append(.control(bytes))
             queuedBytes += bytes.count
             return true
         }
@@ -410,6 +434,21 @@ final class HerdrPaneSession: TerminalSession {
     private var responseCarryFlush: Task<Void, Never>?
     private var gridReports = TerminalGridReports()
     private var gridProbeTask: Task<Void, Never>?
+    private var parserFence = HerdrParserFence()
+    struct MobileReadFence {
+        let id: Int
+        let generation: UUID
+        let snapshot: UUID
+    }
+    var mobileReadFence: MobileReadFence?
+
+    func requestMobileReadFence(generation: UUID, snapshot: UUID) {
+        guard let attachId, let probe = parserFence.issue() else { return }
+        mobileReadFence = MobileReadFence(id: probe.id, generation: generation, snapshot: snapshot)
+        if controller?.router.enqueueReadFence(attachId: attachId, snapshot: snapshot, bytes: probe.bytes) != true {
+            mobileReadFence = nil
+        }
+    }
 
     /// Delivered off-main by the router; mirrors the callback properties.
     let outputSink = OutputSink()
@@ -451,6 +490,7 @@ final class HerdrPaneSession: TerminalSession {
     func stop() {
         guard isRunning else { return }
         isRunning = false
+        mobileReadFence = nil
         gridProbeTask?.cancel()
         gridProbeTask = nil
         responseCarryFlush?.cancel()
@@ -486,7 +526,17 @@ final class HerdrPaneSession: TerminalSession {
             }
         }
         guard !pending.isEmpty else { return }
-        controller?.sendInput(from: self, pending, automaticReply: HerdrReplyFilter.isAutomaticReply(pending))
+        // Filter after the existing response reassembly. Keeping a second
+        // ambiguous ESC carry ahead of it could swallow a user's Escape key
+        // forever when a queued probe was discarded by a replacement snapshot.
+        let fences = parserFence.consume(pending)
+        for id in fences.acknowledged {
+            guard let fence = mobileReadFence, fence.id == id else { continue }
+            mobileReadFence = nil
+            controller?.mobileParserDidDrain(self, fence: fence)
+        }
+        guard !fences.forward.isEmpty else { return }
+        controller?.sendInput(from: self, fences.forward, automaticReply: HerdrReplyFilter.isAutomaticReply(fences.forward))
     }
 
     private static let maxResponseCarryBytes = 64 * 1024
@@ -542,6 +592,7 @@ final class HerdrPaneSession: TerminalSession {
     func endedRemotely() {
         guard isRunning else { return }
         isRunning = false
+        mobileReadFence = nil
         gridProbeTask?.cancel()
         gridProbeTask = nil
         onSessionEnd?()

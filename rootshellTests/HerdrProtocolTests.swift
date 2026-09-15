@@ -157,7 +157,7 @@ final class HerdrProtocolTests: XCTestCase {
         refresh.request {
             refreshes += 1
             // The deferred pass can now lay out all 120 server columns
-            // on the phone, overflowing its viewport until input claims.
+            // on the phone, overflowing its viewport until this client claims.
             frameWidth = HerdrGeometry.requiredExtent(
                 cells: 120, cellPixels: metrics.cellPixels, chrome: 8, scale: 3)
             refreshed.fulfill()
@@ -347,4 +347,101 @@ final class HerdrProtocolTests: XCTestCase {
         XCTAssertFalse(HerdrUpgradePrompt.sharedViewingNeedsUpgrade.isHardRefusal)
         XCTAssertTrue(HerdrUpgradePrompt.versionTooOld(reported: "0.8.0").message.contains("0.8.0"))
     }
+    // MARK: Mobile activation
+
+    func testMobileActivationIsOneShotUntilSelectionOrResume() {
+        var state = HerdrMobileActivation()
+        XCTAssertTrue(state.select("a", panes: ["p", "q"]))
+        let first = state.generation
+        XCTAssertTrue(state.needsClaim)
+        // Repeated topology/layout callbacks do not manufacture a handoff.
+        XCTAssertFalse(state.select("a", panes: ["p", "q"]))
+        state.claimed(generation: first)
+        state.finishPane("p")
+        XCTAssertFalse(state.needsClaim)
+        XCTAssertEqual(state.pendingPanes, ["q"])
+        XCTAssertFalse(state.select("a", panes: ["p", "q"]))
+        XCTAssertEqual(state.generation, first)
+        state.suspend()
+        XCTAssertTrue(state.pendingPanes.isEmpty)
+        XCTAssertTrue(state.select("a", panes: ["p", "q"]))
+        XCTAssertTrue(state.needsClaim)
+        XCTAssertNotEqual(state.generation, first)
+    }
+
+    func testLateClaimCannotCompleteAnotherSelectionOrReconnection() {
+        var state = HerdrMobileActivation()
+        state.select("a", panes: ["p"])
+        let old = state.generation
+        state.select("b", panes: ["q"])
+        state.claimed(generation: old)
+        XCTAssertTrue(state.needsClaim)
+        XCTAssertEqual(state.pendingPanes, ["q"])
+        let beforeReconnect = state.generation
+        state.suspend()
+        state.select("b", panes: ["q"])
+        state.claimed(generation: beforeReconnect)
+        XCTAssertTrue(state.needsClaim)
+        state.claimed(generation: state.generation)
+        XCTAssertFalse(state.needsClaim)
+    }
+
+    func testGatewayRestoreAndUserScrollCancellation() {
+        var state = HerdrMobileActivation()
+        XCTAssertFalse(state.select(nil, panes: []))
+        XCTAssertTrue(state.select("restored", panes: ["p", "q"]))
+        // Failed claims leave intent pending; user scrolling cancels only
+        // that pane's viewport jump, not the tab's requested sizing.
+        state.finishPane("p")
+        XCTAssertTrue(state.needsClaim)
+        XCTAssertEqual(state.pendingPanes, ["q"])
+        XCTAssertFalse(state.select("restored", panes: ["p", "q"]))
+        XCTAssertEqual(state.pendingPanes, ["q"])
+        state.select(nil, panes: [])
+        XCTAssertFalse(state.needsClaim)
+        XCTAssertTrue(state.pendingPanes.isEmpty)
+        XCTAssertTrue(state.select("restored", panes: ["p", "q"]))
+    }
+
+    // MARK: Ordered local parser acknowledgements
+
+    func testParserFenceConsumesEveryPossibleSplitWithoutLeakingToServer() throws {
+        let reply = Data("\u{1b}[?16000;0$y".utf8)
+        for cut in 0...reply.count {
+            var fence = HerdrParserFence()
+            let probe = try XCTUnwrap(fence.issue())
+            XCTAssertEqual(probe.bytes, Data("\u{1b}[?16000$p".utf8))
+            let a = fence.consume(Data("before".utf8) + reply.prefix(cut))
+            let b = fence.consume(reply.suffix(reply.count - cut) + Data("after".utf8))
+            XCTAssertEqual(a.forward + b.forward, Data("beforeafter".utf8))
+            XCTAssertEqual(a.acknowledged + b.acknowledged, [probe.id])
+        }
+    }
+
+    func testParserFenceKeepsOldAndReplacementAcknowledgementsDistinct() throws {
+        var fence = HerdrParserFence()
+        let old = try XCTUnwrap(fence.issue())
+        let replacement = try XCTUnwrap(fence.issue())
+        let oldReply = fence.consume(Data("\u{1b}[?\(old.id);0$y".utf8))
+        XCTAssertEqual(oldReply.acknowledged, [old.id])
+        XCTAssertNotEqual(old.id, replacement.id)
+        XCTAssertTrue(oldReply.forward.isEmpty)
+        let newReply = fence.consume(Data("\u{1b}[?\(replacement.id);0$y".utf8))
+        XCTAssertEqual(newReply.acknowledged, [replacement.id])
+        XCTAssertTrue(newReply.forward.isEmpty)
+    }
+
+    func testParserFencePreservesUnrelatedReportsAndInput() throws {
+        var fence = HerdrParserFence()
+        _ = try XCTUnwrap(fence.issue())
+        let unrelated = Data("x\u{1b}[8;24;80t\u{1b}[?25;1$y\u{1b}[?16001;0$y\u{1b}]10;rgb:ff/ff/ff\u{7}\u{1b}[A".utf8)
+        var forwarded = Data()
+        for byte in unrelated {
+            let result = fence.consume(Data([byte]))
+            forwarded.append(result.forward)
+            XCTAssertTrue(result.acknowledged.isEmpty)
+        }
+        XCTAssertEqual(forwarded, unrelated)
+    }
+
 }
