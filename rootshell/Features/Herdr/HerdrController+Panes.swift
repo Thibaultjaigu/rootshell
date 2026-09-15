@@ -74,6 +74,9 @@ extension HerdrController {
             return
         }
         guard let attachId = session.attachId, let channel else { return }
+        // Typing is fresh intent: a pane the user scrolled away from earlier
+        // may follow the handoff this keystroke earns.
+        if !automaticReply { activation.renewAfterInput(session.terminalId) }
         // The session gates replies at the parser's authority boundary.
         // Still mark them automatic: the server's grace window admits an
         // outstanding reply from before the handoff without claiming input.
@@ -395,12 +398,9 @@ extension HerdrController {
         }
     }
 
-    /// Whether this tab may be sized from here right now. On a device only
-    /// the selected tab of the active window is laid out for the screen. A Mac
-    /// keeps every hosted tab measured, because a stored size (claim:false)
-    /// costs another client nothing; without shared viewing there is no such
-    /// thing as storing a size, so every push would take a tab this window is
-    /// not even showing.
+    /// Whether this tab may be sized from here right now. A device lays out
+    /// only the selected tab; a Mac measures them all, except on a server
+    /// with no stored size, where every push would take the tab.
     func maySizeTab(_ tab: TabModel) -> Bool {
         #if targetEnvironment(macCatalyst)
         if capabilities.supportsSharedViewing { return true }

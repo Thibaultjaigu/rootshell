@@ -538,6 +538,21 @@ final class HerdrProtocolTests: XCTestCase {
     }
     // MARK: Activation
 
+    func testACancelledPaneStaysCancelledThroughTheHandoff() {
+        var state = HerdrActivation()
+        XCTAssertTrue(state.select("a", panes: ["p", "q"]))
+        // The user scrolls while the claim is still in flight.
+        state.cancelPane("p")
+        XCTAssertEqual(state.pendingPanes, ["q"])
+        // The handoff answering that claim arrives late and must not re-arm it.
+        state.expectReturnToLive(tabID: "a", panes: ["p", "q"])
+        XCTAssertEqual(state.pendingPanes, ["q"])
+        // A new activation is the user arriving again, so it starts clean.
+        state.suspend()
+        XCTAssertTrue(state.select("a", panes: ["p", "q"]))
+        XCTAssertEqual(state.pendingPanes, ["p", "q"])
+    }
+
     func testExpectingReturnToLiveNeverClaimsATab() {
         var state = HerdrActivation()
         // A handoff earned by typing: the tab is ours, nothing was asked for.

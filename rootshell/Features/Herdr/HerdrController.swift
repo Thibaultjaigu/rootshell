@@ -283,11 +283,9 @@ final class HerdrController {
     private static var terminateObserver: NSObjectProtocol?
     private static var sceneObservers: [NSObjectProtocol] = []
 
-    /// A control connection can outlive the app: the bridge runs inside the
-    /// gateway's session, and an attachable tssh session keeps its processes
-    /// running after we disconnect. The server then still counts that dead
-    /// client as a viewer holding a tab's geometry, and the next launch has
-    /// to win the tab back from its own ghost. Ask the bridges to go first.
+    /// A bridge can outlive the app when its session is persistent, leaving
+    /// the server counting a dead client as a viewer that can hold a tab's
+    /// geometry. Ask the bridges to go first.
     static func closeAllForTermination() {
         let channels = all.compactMap(\.channel)
         guard !channels.isEmpty else { return }
@@ -319,10 +317,9 @@ final class HerdrController {
                 }
             }
         }
-        // A scene loses the user on iOS by backgrounding. A Catalyst window
-        // stays in the foreground when the app is no longer frontmost or
-        // another window takes key, so deactivation ends its activation
-        // there; on iOS that would also fire for a banner or Control Center.
+        // A device scene loses the user by backgrounding; a Catalyst window
+        // stays foreground and loses it by deactivating. On iOS deactivation
+        // would also fire for a banner or Control Center.
         #if targetEnvironment(macCatalyst)
         let sceneEnd = UIScene.willDeactivateNotification
         #else

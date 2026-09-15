@@ -69,11 +69,8 @@ extension HerdrController {
         }
     }
 
-    /// The tab is ours again, which on a server that hands tabs over on
-    /// interaction can be the work of a single keystroke: the resize and the
-    /// replay that follow would otherwise leave the viewport wherever the
-    /// rebuild put it, until the next key scrolled it down. No claim is made
-    /// here; we already have the tab.
+    /// The tab is ours again, so the resize and replay that follow should end
+    /// at the live bottom. Claims nothing: we already have the tab.
     func expectReturnToLive(tabId: String) {
         guard !didEnd, mode == .raw, isActive, capabilities.supportsSharedViewing, windowIsActive,
               let tab = tabs[tabId], tab.id == tabsModel.selectedTabID else { return }
@@ -83,6 +80,8 @@ extension HerdrController {
         guard !terminalIDs.isEmpty else { return }
         activation.expectReturnToLive(tabID: tabId, panes: terminalIDs)
         for view in visiblePanes where !view.isActivelySelecting {
+            guard let terminalID = view.herdrPaneBinding?.terminalId,
+                  activation.pendingPanes.contains(terminalID) else { continue }
             view.prepareHerdrReturnToLive()
         }
     }
@@ -93,7 +92,7 @@ extension HerdrController {
     }
 
     func cancelReturnToLive(terminalID: String) {
-        activation.finishPane(terminalID)
+        activation.cancelPane(terminalID)
         paneSessions[terminalID]?.readFence = nil
     }
 
@@ -332,13 +331,9 @@ extension HerdrController {
         pumpAttachQueue()
     }
 
-    /// What tmux's `detach-client -a` maps to here. herdr has no method to
-    /// close another client's connection, and shared viewing is the point of
-    /// protocol 2, so this takes the whole session instead of emptying it:
-    /// every tab's geometry, and every pane another client holds. Viewers
-    /// stay attached; nothing else decides how this session is laid out.
-    /// A tab with no size on this device yet keeps the claim pending until
-    /// it is shown, rather than taking it at a size measured elsewhere.
+    /// What tmux's `detach-client -a` maps to here: herdr cannot close
+    /// another client's connection, so take every tab's geometry and every
+    /// pane another client holds. A tab with no size here yet claims later.
     @discardableResult
     func takeControlOfSession() -> Bool {
         guard !didEnd, mode == .raw, channel != nil, !tabs.isEmpty else { return false }

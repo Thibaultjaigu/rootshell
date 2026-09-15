@@ -270,6 +270,10 @@ nonisolated struct HerdrActivation {
     private(set) var generation = UUID()
     private(set) var needsClaim = false
     private(set) var pendingPanes: Set<String> = []
+    /// Panes the user took back within this activation. The handoff that
+    /// answers our claim can arrive after they scrolled, and must not re-arm
+    /// a jump they already cancelled.
+    private(set) var cancelledPanes: Set<String> = []
     private var needsActivationEdge = true
 
     @discardableResult
@@ -279,6 +283,7 @@ nonisolated struct HerdrActivation {
         generation = UUID()
         needsClaim = tabID != nil
         pendingPanes = tabID == nil ? [] : panes
+        cancelledPanes.removeAll()
         // A gateway can be selected before its recovered terminal exists.
         needsActivationEdge = tabID == nil
         return tabID != nil
@@ -289,21 +294,35 @@ nonisolated struct HerdrActivation {
         needsActivationEdge = true
         needsClaim = false
         pendingPanes.removeAll()
+        cancelledPanes.removeAll()
     }
 
     /// Expect these panes to return to live output on a tab that is already
-    /// ours, without asking for the tab again. The server hands a tab over on
-    /// interaction, so a keystroke can bring a resize and a replay with no
-    /// activation edge anywhere in sight. Claiming intent is untouched: this
-    /// never takes a tab, it only follows one we were just given.
+    /// ours: the server hands a tab over on interaction, so a keystroke can
+    /// bring a resize with no activation edge. Never claims.
     mutating func expectReturnToLive(tabID: String, panes: Set<String>) {
         if self.tabID != tabID {
             self.tabID = tabID
             generation = UUID()
             needsClaim = false
             pendingPanes = []
+            cancelledPanes.removeAll()
         }
-        pendingPanes.formUnion(panes)
+        pendingPanes.formUnion(panes.subtracting(cancelledPanes))
+    }
+
+    /// The user scrolled or selected in this pane: it keeps the position it
+    /// has, for this activation and for any handoff that answers it.
+    mutating func cancelPane(_ terminalID: String) {
+        guard pendingPanes.contains(terminalID) || tabID != nil else { return }
+        pendingPanes.remove(terminalID)
+        cancelledPanes.insert(terminalID)
+    }
+
+    /// The user typed here: new intent, not the activation they scrolled
+    /// away from, so a handoff it earns may arm the jump again.
+    mutating func renewAfterInput(_ terminalID: String) {
+        cancelledPanes.remove(terminalID)
     }
 
     mutating func claimed(generation: UUID) {
