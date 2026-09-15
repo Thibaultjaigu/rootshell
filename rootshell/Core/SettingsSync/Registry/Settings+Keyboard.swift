@@ -14,6 +14,22 @@ extension KeyboardArrowJoystickButton.Mode: SettingValue {}
 
 nonisolated extension Settings {
     enum Keyboard {
+        static let touchEnabled = SettingKey(
+            "terminalTouchKeyboardEnabled", default: false, group: .keyboard, policy: .localByDefault,
+            configKey: "terminal-touch-keyboard", title: String(localized: "Terminal Keyboard"))
+        static let touchSuggestions = SettingKey(
+            "terminalTouchKeyboardSuggestions", default: false, group: .keyboard, policy: .localByDefault,
+            configKey: "terminal-touch-keyboard-suggestions", title: String(localized: "Terminal Keyboard Suggestions"))
+        static let touchHaptics = SettingKey(
+            "terminalTouchKeyboardHaptics", default: false, group: .keyboard, policy: .localByDefault,
+            configKey: "terminal-touch-keyboard-haptics", title: String(localized: "Terminal Keyboard Haptics"))
+        static let touchCompactHeight = SettingKey(
+            "terminalTouchKeyboardCompactHeight", default: false, group: .keyboard, policy: .localByDefault,
+            configKey: "terminal-touch-keyboard-compact-height", title: String(localized: "Compact Keyboard Height"))
+        static let touchGlyphs = SettingKey(
+            "terminalTouchKeyboardGlyphs", default: true, group: .keyboard, policy: .localByDefault,
+            configKey: "terminal-touch-keyboard-glyphs", title: String(localized: "Keyboard Key Glyphs"))
+
         static let writingAssistance = SettingKey(
             "terminalWritingAssistanceMode", default: TerminalWritingAssistanceMode.off, group: .keyboard,
             configKey: "terminal-writing-assistance",
@@ -34,7 +50,8 @@ nonisolated extension Settings {
 
         static let all: [AnySettingDefinition] = [
             optionKeyAsAlt.erased, forceASCIIKeyboard.erased, doubleSpaceForPeriod.erased, composeAutocorrect.erased,
-            writingAssistance.erased,
+            writingAssistance.erased, touchEnabled.erased, touchSuggestions.erased, touchHaptics.erased,
+            touchCompactHeight.erased, touchGlyphs.erased,
         ]
     }
 

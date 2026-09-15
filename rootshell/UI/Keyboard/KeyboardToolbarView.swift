@@ -221,6 +221,12 @@ class KeyboardToolbarView: UIView {
     weak var delegate: KeyboardButtonDelegate?
 
     /// Callback when active modifiers change
+    /// A session-local return key after switching from the optional touch keyboard.
+    /// This does not alter the user's saved toolbar layout.
+    var onTouchKeyboardRequested: (() -> Void)? {
+        didSet { rebuildForCurrentWidth() }
+    }
+
     var onModifiersChanged: ((KeyModifiers) -> Void)?
 
     /// Callback when dismiss button is tapped
@@ -573,7 +579,17 @@ class KeyboardToolbarView: UIView {
         let edgePadding = currentEdgePadding()
         let chromeInsets = currentChromeHorizontalInsets()
         let availableWidth = width - edgePadding * 2 - chromeInsets.left - chromeInsets.right
-        let mainSlots = manager.effectiveMainRowSlots(availableWidth: availableWidth)
+        let switchWidth = onTouchKeyboardRequested == nil ? 0 : sizes.button.wideWidth + sizes.toolbar.spacing
+        let mainSlots = manager.effectiveMainRowSlots(availableWidth: availableWidth - switchWidth)
+        if onTouchKeyboardRequested != nil {
+            let button = UIButton(type: .system)
+            button.setImage(UIImage(systemName: "keyboard.badge.ellipsis"), for: .normal)
+            button.tintColor = .label
+            button.accessibilityLabel = String(localized: "Use Terminal Keyboard")
+            button.widthAnchor.constraint(equalToConstant: sizes.button.wideWidth).isActive = true
+            button.addAction(UIAction { [weak self] _ in self?.onTouchKeyboardRequested?() }, for: .touchUpInside)
+            mainRowStackView.addArrangedSubview(button)
+        }
 
         for slot in mainSlots {
             if let button = createButtonForSlot(slot) {

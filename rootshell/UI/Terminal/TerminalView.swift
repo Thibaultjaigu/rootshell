@@ -3730,6 +3730,7 @@ extension Ghostty {
 
         @discardableResult
         override func resignFirstResponder() -> Bool {
+            keyboardAccessoryController?.cancelTouchKeyboardInteraction()
             invalidateWritingAssistance(resetDocument: true)
             #if !targetEnvironment(macCatalyst)
             if shouldPreserveFirstResponderForSoftwareKeyboardAppTransition() {
@@ -3962,6 +3963,8 @@ extension Ghostty {
         }
         #endif
         
+        func resetDoubleSpaceTracking() { lastSpaceInsertTime = nil }
+
         func insertText(_ text: String) {
             // Software-keyboard and input-method text arrives here, not through
             // `pressesBegan`, and the terminal is not a UITextField, so this is
@@ -4092,6 +4095,7 @@ extension Ghostty {
             // Double-space-for-period: when enabled, two rapid spaces become ". "
             #if !targetEnvironment(macCatalyst)
             if finalText == " ",
+               keyboardAccessoryController?.usesTouchKeyboard != true,
                SettingsStore.shared.value(Settings.Keyboard.doubleSpaceForPeriod),
                let lastSpace = lastSpaceInsertTime,
                Date().timeIntervalSince(lastSpace) < 0.3 {
