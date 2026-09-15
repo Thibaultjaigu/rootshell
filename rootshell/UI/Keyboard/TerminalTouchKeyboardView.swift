@@ -1,6 +1,19 @@
 import UIKit
 import Combine
 
+private enum TerminalTouchKeyboardAppearance {
+    static let background = UIColor { traits in
+        traits.userInterfaceStyle == .dark
+            ? UIColor(red: 34 / 255, green: 34 / 255, blue: 39 / 255, alpha: 1)
+            : UIColor(red: 210 / 255, green: 213 / 255, blue: 219 / 255, alpha: 1)
+    }
+    static let toolbar = UIColor { traits in
+        traits.userInterfaceStyle == .dark
+            ? UIColor(red: 38 / 255, green: 38 / 255, blue: 46 / 255, alpha: 1)
+            : UIColor(red: 233 / 255, green: 235 / 255, blue: 240 / 255, alpha: 1)
+    }
+}
+
 /// An in-app keyboard. The terminal remains first responder throughout typing.
 @MainActor
 protocol TerminalTouchKeyboardHost: AnyObject {
@@ -18,6 +31,7 @@ private final class TerminalTouchKeycap: UIView {
     let label = UILabel()
     let icon = UIImageView()
     private let lockIndicator = UIView()
+    private let toolbarKey: Bool
     var locked = false { didSet { lockIndicator.isHidden = !locked } }
     var activate: (() -> Void)?
     var pressed = false { didSet { updateColor() } }
@@ -25,12 +39,13 @@ private final class TerminalTouchKeycap: UIView {
 
     init(_ key: TerminalTouchKeyboardModel.Key, small: Bool = false) {
         self.key = key
+        self.toolbarKey = small
         super.init(frame: .zero)
         isAccessibilityElement = true
         accessibilityTraits = [.keyboardKey]
         accessibilityLabel = key.accessibility ?? key.title
         plate.isUserInteractionEnabled = false
-        plate.layer.cornerRadius = small ? 10 : 7
+        plate.layer.cornerRadius = small ? 12 : 8
         plate.layer.cornerCurve = .continuous
         plate.layer.shadowColor = UIColor.black.cgColor
         plate.layer.shadowOffset = CGSize(width: 0, height: 1)
@@ -67,12 +82,18 @@ private final class TerminalTouchKeycap: UIView {
     }
     func updateColor() {
         let character: Bool = { if case .text = key.action { return true }; return false }()
-        let selected = self.selected, pressed = self.pressed
+        let selected = self.selected, pressed = self.pressed, toolbarKey = self.toolbarKey
         // A keyboard can acquire its final appearance after attachment. Do not
         // mix a light-only background with a dynamically changing .label color.
         plate.backgroundColor = UIColor { traits in
+            if toolbarKey && !selected {
+                return pressed ? UIColor.label.resolvedColor(with: traits).withAlphaComponent(0.12) : .clear
+            }
             let colors = TerminalTouchKeyboardModel.keyColors(dark: traits.userInterfaceStyle == .dark,
                 character: character, pressed: pressed, selected: selected)
+            if traits.userInterfaceStyle == .dark, !selected {
+                return UIColor(red: colors.background, green: colors.background, blue: colors.background + 4 / 255, alpha: 1)
+            }
             return UIColor(white: colors.background, alpha: 1)
         }
         let ink = UIColor { traits in
@@ -83,8 +104,8 @@ private final class TerminalTouchKeycap: UIView {
         label.textColor = ink
         icon.tintColor = ink
         lockIndicator.backgroundColor = ink
-        plate.layer.shadowOpacity = 0.2
-        plate.layer.borderWidth = UIAccessibility.isDarkerSystemColorsEnabled ? 1 : 0
+        plate.layer.shadowOpacity = toolbarKey || traitCollection.userInterfaceStyle == .dark ? 0 : 0.12
+        plate.layer.borderWidth = UIAccessibility.isDarkerSystemColorsEnabled && (!toolbarKey || selected) ? 1 : 0
         plate.layer.borderColor = UIColor.label.cgColor
         accessibilityTraits = selected ? [.keyboardKey, .selected] : [.keyboardKey]
     }
@@ -137,7 +158,7 @@ final class TerminalTouchKeyboardView: UIInputView, KeyboardButtonDelegate {
     private var drawerOpen = false
     private var rows: [[TerminalTouchKeycap]] = []
     private var controls: [TerminalTouchKeycap] = []
-    private let background = UIVisualEffectView(effect: UIBlurEffect(style: .systemMaterial))
+    private let background = UIView()
     private let controlGlass = UIVisualEffectView()
     private let drawer = UIScrollView()
     private let sections = UISegmentedControl(items: ["Symbols", "Navigation", "Shortcuts", "Custom"])
@@ -197,14 +218,19 @@ final class TerminalTouchKeyboardView: UIInputView, KeyboardButtonDelegate {
     private var desiredHeight: CGFloat { 48 + rowHeight * 4 + bottomInset + (drawerOpen ? drawerHeight : 0) + (suggestionsEnabled ? 36 : 0) }
 
     init() {
-        super.init(frame: CGRect(x: 0, y: 0, width: 390, height: 304), inputViewStyle: .keyboard)
+        // Supply one surface ourselves; UIKit's keyboard style adds another
+        // material behind it, which washes out the native dark palette.
+        super.init(frame: CGRect(x: 0, y: 0, width: 390, height: 304), inputViewStyle: .default)
         allowsSelfSizing = true
         translatesAutoresizingMaskIntoConstraints = false
         isMultipleTouchEnabled = true
         background.isUserInteractionEnabled = false
+        background.layer.cornerRadius = 24
+        background.layer.cornerCurve = .continuous
+        background.layer.maskedCorners = [.layerMinXMinYCorner, .layerMaxXMinYCorner]
         addSubview(background)
         controlGlass.isUserInteractionEnabled = false
-        controlGlass.layer.cornerRadius = 15
+        controlGlass.layer.cornerRadius = 22
         controlGlass.layer.cornerCurve = .continuous
         controlGlass.clipsToBounds = true
         addSubview(controlGlass)
@@ -305,14 +331,20 @@ final class TerminalTouchKeyboardView: UIInputView, KeyboardButtonDelegate {
     }
 
     private func updateAppearance() {
-        background.effect = UIAccessibility.isReduceTransparencyEnabled ? nil : UIBlurEffect(style: .systemMaterial)
-        background.backgroundColor = UIAccessibility.isReduceTransparencyEnabled ? .secondarySystemBackground : .clear
+        background.backgroundColor = TerminalTouchKeyboardAppearance.background
         if #available(iOS 26.0, *), !UIAccessibility.isReduceTransparencyEnabled {
-            controlGlass.effect = UIGlassEffect(style: .regular)
+            let glass = UIGlassEffect(style: .clear)
+            glass.tintColor = TerminalTouchKeyboardAppearance.toolbar.withAlphaComponent(0.8)
+            controlGlass.effect = glass
+            controlGlass.contentView.backgroundColor = .clear
+        } else if UIAccessibility.isReduceTransparencyEnabled {
+            controlGlass.effect = nil
+            controlGlass.contentView.backgroundColor = TerminalTouchKeyboardAppearance.toolbar
         } else {
             controlGlass.effect = UIBlurEffect(style: .systemThinMaterial)
+            controlGlass.contentView.backgroundColor = TerminalTouchKeyboardAppearance.toolbar.withAlphaComponent(0.75)
         }
-        controlGlass.backgroundColor = UIAccessibility.isReduceTransparencyEnabled ? .secondarySystemBackground : .clear
+        controlGlass.backgroundColor = .clear
         preview.backgroundColor = .secondarySystemBackground
         preview.textColor = .label
         accents.backgroundColor = .secondarySystemBackground
@@ -371,8 +403,8 @@ final class TerminalTouchKeyboardView: UIInputView, KeyboardButtonDelegate {
         let leading = max(safeAreaInsets.left, window?.safeAreaInsets.left ?? 0)
         let trailing = max(safeAreaInsets.right, window?.safeAreaInsets.right ?? 0)
         let width = max(0, bounds.width - leading - trailing)
-        background.frame = bounds
-        controlGlass.frame = CGRect(x: leading + 5, y: 3, width: max(0, width - 10), height: 42)
+        background.frame = CGRect(x: 0, y: 48, width: bounds.width, height: max(0, bounds.height - 48))
+        controlGlass.frame = CGRect(x: leading + 2, y: 2, width: max(0, width - 4), height: 44)
         for (cap, rect) in zip(controls, Model.frames(keys: controls.map(\.key), width: width, y: 0, height: 48, inset: 5)) { cap.frame = rect.offsetBy(dx: leading, dy: 0) }
         if let modeCap = controls.first(where: { $0.key.action == .mode }) {
             modeButton.frame = modeCap.frame.insetBy(dx: 4, dy: 5)

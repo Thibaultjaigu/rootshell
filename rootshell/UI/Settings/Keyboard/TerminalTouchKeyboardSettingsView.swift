@@ -45,7 +45,7 @@ struct TerminalTouchKeyboardSettingsView: View {
             } header: {
                 Text("Typing")
             } footer: {
-                Text("Suggestions are local English spelling guesses and completions. Tap to apply one to recent input. The keyboard never automatically corrects text or adds punctuation.")
+                Text("Suggestions are local English spelling guesses and completions. Tap to apply one to recent input. Text is never automatically corrected. The double-space period shortcut follows your Terminal keyboard setting.")
             }
             Section {
                 SettingToggle(Settings.Keyboard.touchCompactHeight, title: "Compact Height", icon: "arrow.down.to.line")

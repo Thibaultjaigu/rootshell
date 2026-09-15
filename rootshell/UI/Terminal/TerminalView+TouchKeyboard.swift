@@ -21,6 +21,8 @@ extension Ghostty.TerminalView: TerminalTouchKeyboardHost {
 
     func touchKeyboardSend(_ key: String, modifiers: KeyModifiers) {
         guard touchKeyboardCanSend else { return }
+        // Special keys bypass insertText, but still interrupt consecutive spaces.
+        resetDoubleSpaceTracking()
         if key == "\u{7f}", modifiers.isEmpty { deleteBackward(); return }
         invalidateWritingAssistance()
         let special: [String: UIKeyboardHIDUsage] = [

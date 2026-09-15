@@ -80,7 +80,8 @@ nonisolated enum TerminalTouchKeyboardModel {
     /// Both cap and ink must resolve from the same appearance, including Shift.
     static func keyColors(dark: Bool, character: Bool, pressed: Bool, selected: Bool) -> (background: Double, ink: Double) {
         if selected { return dark ? (0.96, 0.08) : (0.12, 1.0) }
-        if dark { return (pressed ? 0.44 : (character ? 0.32 : 0.19), 1.0) }
+        // Native dark keyboards use the same muted fill for letters and utilities.
+        if dark { return (pressed ? 0.36 : 0.27, 1.0) }
         return (pressed ? 0.75 : (character ? 1.0 : 0.79), 0.08)
     }
 

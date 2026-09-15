@@ -4095,7 +4095,6 @@ extension Ghostty {
             // Double-space-for-period: when enabled, two rapid spaces become ". "
             #if !targetEnvironment(macCatalyst)
             if finalText == " ",
-               keyboardAccessoryController?.usesTouchKeyboard != true,
                SettingsStore.shared.value(Settings.Keyboard.doubleSpaceForPeriod),
                let lastSpace = lastSpaceInsertTime,
                Date().timeIntervalSince(lastSpace) < 0.3 {
