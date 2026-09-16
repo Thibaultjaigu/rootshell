@@ -470,11 +470,121 @@ final class TerminalTouchKeyboardTests: XCTestCase {
         XCTAssertFalse(Model.isFloatingInput(width: 0, hostWidth: 834, isPad: true))
     }
 
-    func testTabMenuAndModeAreAlwaysInControlRow() {
-        XCTAssertTrue(Model.controls.contains { $0.action == .tabs })
-        XCTAssertTrue(Model.controls.contains { $0.action == .mode })
-        XCTAssertEqual(Model.controls.count, 8)
-        XCTAssertTrue(Model.Preset.allCases.contains(.agent))
+    func testToolbarRetainsConfiguredRowsAndMovesOverflowToFirstDrawer() {
+        let main = (0..<12).map { Model.Key(title: "Key \($0)", action: .custom(UUID())) }
+        let drawers = [[Model.Key(title: "Ctrl", action: .modifier(.control))],
+                       [Model.Key(title: "Paste", action: .paste)]]
+        for width: CGFloat in [0, 320, 390, 1024] {
+            let layout = Model.toolbarKeys(main: main, drawers: drawers, width: width)
+            XCTAssertEqual(layout.main + layout.drawers.flatMap { $0 }, main + drawers.flatMap { $0 })
+            XCTAssertLessThanOrEqual(layout.main.count, max(1, Int(max(0, width - 10) / 40)))
+        }
+        let empty = Model.toolbarKeys(main: [], drawers: [[]], width: 390)
+        XCTAssertTrue(empty.main.isEmpty)
+        XCTAssertEqual(empty.drawers, [[]])
+    }
+
+    func testDrawerToggleDisplacesButDoesNotLoseLastVisibleCustomKey() {
+        let main = (0..<12).map { Model.Key(title: "Key \($0)", action: .custom(UUID())) }
+        let drawers = [[Model.Key(title: "Ctrl", action: .modifier(.control))],
+                       [Model.Key(title: "Paste", action: .paste)]]
+        let toggle = Model.Key(title: "…", action: .drawer)
+        let layout = Model.toolbarKeys(main: main, drawers: drawers, width: 320, drawerToggle: toggle)
+        XCTAssertEqual(layout.main.last, toggle)
+        XCTAssertEqual(layout.drawers[0], Array(main.dropFirst(layout.main.count - 1)) + drawers[0])
+        XCTAssertEqual(layout.drawers[1], drawers[1])
+        XCTAssertEqual(layout.main.filter { $0 != toggle } + layout.drawers.flatMap { $0 }, main + drawers.flatMap { $0 })
+        let hiddenToggle = Model.toolbarKeys(main: main, drawers: drawers, width: 320)
+        XCTAssertFalse(hiddenToggle.main.contains(toggle))
+    }
+
+    func testSystemKeyboardSwitchReservesOneSlotWithoutLosingDisplacedKeys() {
+        let main = ["Escape", "Control", "Paste", "Custom icon", "More"]
+        let drawers = [["Tab", "Alt"], ["Command", "Custom sequence"]]
+        let normal = KeyboardToolbarOverflow.layout(main: main, drawers: drawers, capacity: 5,
+            drawerToggle: "More", keepsDrawerToggleVisible: true)
+        XCTAssertEqual(normal.main, main)
+        XCTAssertEqual(normal.drawers, drawers)
+        let withSwitch = KeyboardToolbarOverflow.layout(main: main, drawers: drawers, capacity: 5,
+            reservedSlots: 1, drawerToggle: "More", keepsDrawerToggleVisible: true)
+        XCTAssertEqual(withSwitch.main, ["Escape", "Control", "Paste", "More"])
+        XCTAssertEqual(withSwitch.drawers, [["Custom icon", "Tab", "Alt"], drawers[1]])
+        // Showing/hiding the runtime switch and resizing must preserve every
+        // key exactly once, in order, without rewriting the configured rows.
+        for capacity in 2...8 {
+            for reserved in [0, 1, 0] {
+                let layout = KeyboardToolbarOverflow.layout(main: main, drawers: drawers, capacity: capacity,
+                    reservedSlots: reserved, drawerToggle: "More", keepsDrawerToggleVisible: true)
+                XCTAssertEqual((layout.main + layout.drawers.flatMap { $0 }).filter { $0 != "More" },
+                               main.filter { $0 != "More" } + drawers.flatMap { $0 })
+                XCTAssertEqual(layout.drawers[1], drawers[1])
+                XCTAssertEqual(layout.main.filter { $0 == "More" }.count, 1)
+                XCTAssertLessThanOrEqual(layout.main.count + reserved, capacity)
+            }
+        }
+    }
+
+    func testCustomDrawersStackAboveFirstRowThenClose() {
+        var state = Model.ToolbarDrawerState.closed
+        for expected in [[0], [1, 0], [2, 1, 0], []] {
+            state = state.toggled(rowCount: 3, cycle: false)
+            XCTAssertEqual(state.visibleRows(rowCount: 3), expected)
+        }
+        XCTAssertEqual(state, .closed)
+    }
+
+    func testCustomDrawersCycleAndAdaptToSettingsChanges() {
+        var state = Model.ToolbarDrawerState.closed
+        for expected in [[0], [1], [2], []] {
+            state = state.toggled(rowCount: 3, cycle: true)
+            XCTAssertEqual(state.visibleRows(rowCount: 3), expected)
+        }
+        XCTAssertEqual(Model.ToolbarDrawerState.cycling(2).clamped(rowCount: 1), .cycling(0))
+        XCTAssertEqual(Model.ToolbarDrawerState.stacked(3).clamped(rowCount: 1), .stacked(1))
+        XCTAssertEqual(Model.ToolbarDrawerState.cycling(2).visibleRows(rowCount: 1), [0])
+        XCTAssertEqual(Model.ToolbarDrawerState.stacked(3).visibleRows(rowCount: 1), [0])
+        XCTAssertEqual(Model.ToolbarDrawerState.stacked(2).toggled(rowCount: 3, cycle: true), .closed)
+        XCTAssertEqual(Model.ToolbarDrawerState.cycling(1).toggled(rowCount: 3, cycle: false), .closed)
+    }
+
+    func testKeyboardPagesAreReachableInBothDirections() {
+        var page = Model.ToolPage.typing
+        var visited = Set<Int>()
+        for _ in Model.ToolPage.allCases {
+            visited.insert(page.rawValue)
+            page = page.moved(by: 1)
+        }
+        XCTAssertEqual(page, .typing)
+        XCTAssertEqual(visited.count, Model.ToolPage.allCases.count)
+        XCTAssertEqual(Model.ToolPage.typing.moved(by: -1), .shortcuts)
+        XCTAssertEqual(Model.ToolPage.navigation.moved(by: -1), .symbols)
+    }
+
+    func testPageSwipeRequiresDeliberateHorizontalMovement() {
+        XCTAssertEqual(Model.pageSwipe(translation: CGPoint(x: -100, y: 10)), 1)
+        XCTAssertEqual(Model.pageSwipe(translation: CGPoint(x: 100, y: -10)), -1)
+        XCTAssertNil(Model.pageSwipe(translation: CGPoint(x: 40, y: 0)))
+        XCTAssertNil(Model.pageSwipe(translation: CGPoint(x: 100, y: 70)))
+        XCTAssertEqual(Model.pageSwipe(translation: CGPoint(x: 100, y: 0)), -1)
+        XCTAssertNil(Model.pageSwipe(translation: CGPoint(x: 0, y: 100)))
+    }
+
+    func testChangingPagesKeepsLatchedModifiersButReleasesHeldTouches() {
+        var modifiers = Model.Modifiers()
+        modifiers.begin(.control)
+        modifiers.end(.control, at: 1)
+        modifiers.begin(.alt)
+        modifiers.end(.alt, at: 2)
+        modifiers.begin(.alt)
+        modifiers.end(.alt, at: 2.2)
+        modifiers.begin(.shift)
+        modifiers.cancelHeld()
+        XCTAssertTrue(modifiers.isActive(.control))
+        XCTAssertTrue(modifiers.locked.contains(.alt))
+        XCTAssertFalse(modifiers.isActive(.shift))
+        modifiers.consume()
+        XCTAssertFalse(modifiers.isActive(.control))
+        XCTAssertTrue(modifiers.isActive(.alt))
     }
 
     func testKeyContrastAcrossAppearancePressedAndLockedStates() {

@@ -113,7 +113,7 @@ private final class TerminalTouchKeycap: UIView {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     func setSymbol(_ name: String?) {
         icon.image = name.flatMap { UIImage(systemName: $0) }
-        label.isHidden = name != nil
+        label.isHidden = icon.image != nil
     }
     override func layoutSubviews() {
         super.layoutSubviews()
@@ -178,7 +178,7 @@ private final class TerminalTouchRepeatingButton: UIButton {
             repeatAction?()
             repeatTask = Task { @MainActor [weak self] in
                 while !Task.isCancelled {
-                    try? await Task.sleep(for: .milliseconds(80))
+                    try? await Task.sleep(for: .milliseconds(55))
                     guard !Task.isCancelled, let self, self.window != nil else { return }
                     self.repeatAction?()
                 }
@@ -189,7 +189,35 @@ private final class TerminalTouchRepeatingButton: UIButton {
     override func didMoveToWindow() { super.didMoveToWindow(); if window == nil { cancelRepeat() } }
 }
 
-final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate {
+/// Wait for a full horizontal stroke before cancelling a key's pending tap.
+/// Failing early on vertical movement lets the tools grid scroll normally.
+private final class TerminalKeyboardPageSwipe: UIGestureRecognizer {
+    private var origin = CGPoint.zero
+    var offset = 0
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
+        guard touches.count == 1, event.allTouches?.count == 1, let touch = touches.first else {
+            state = .failed; return
+        }
+        origin = touch.location(in: view)
+    }
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent) {
+        guard let touch = touches.first else { return }
+        let point = touch.location(in: view)
+        let delta = CGPoint(x: point.x - origin.x, y: point.y - origin.y)
+        if let offset = TerminalTouchKeyboardModel.pageSwipe(translation: delta) {
+            self.offset = offset
+            state = .recognized
+        } else if abs(delta.y) > 35 {
+            state = .failed
+        }
+    }
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent) { state = .failed }
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent) { state = .cancelled }
+    override func reset() { super.reset(); offset = 0 }
+}
+
+final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate, UIGestureRecognizerDelegate {
     typealias Model = TerminalTouchKeyboardModel
     weak var host: TerminalTouchKeyboardHost? { didSet { updateAppearance() } }
     private var palette: TerminalTouchKeyboardPalette?
@@ -204,6 +232,7 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate {
     var onPaste: (() -> Void)?
     var onTabs: (() -> Void)?
     var onCustomize: (() -> Void)?
+    var onToolbarAction: ((String) -> Void)?
     var onHeightChanged: (() -> Void)?
     var onPlacementRequested: ((Model.Placement) -> Void)? { didSet { refreshPlacementActions() } }
     var onFloatingDrag: ((CGPoint, Bool) -> Void)?
@@ -217,17 +246,31 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate {
     private var modifierState = Model.Modifiers()
     private var page = Model.Page.letters
     private var preset = Model.Preset.shell
-    private var drawerOpen = false
+    private var toolPage = Model.ToolPage.typing
+    private var drawerOpen: Bool { toolPage != .typing }
+    private var toolbarDrawerKeys: [[Model.Key]] = []
+    private var configuredDrawerToggle: Model.Key?
+    private var toolbarDrawerState = Model.ToolbarDrawerState.closed
+    private var toolbarDrawerOpenByDefault = KeyboardToolbarManager.shared.drawerOpenByDefault
+    private var toolbarDrawerRows: [UIScrollView] = []
+    private var toolbarDrawerButtons: [[TerminalTouchRepeatingButton]] = []
+    private var toolbarDrawerModifiers: [TerminalTouchRepeatingButton: Model.Modifier] = [:]
+    private var toolbarDrawerHeight: CGFloat { CGFloat(toolbarDrawerRows.count) * 44 }
+    private var toolbarHeight: CGFloat { 48 + toolbarDrawerHeight }
+    private var configuredMain: [Model.Key] = []
+    private var configuredDrawers: [[Model.Key]] = []
     private var rows: [[TerminalTouchKeycap]] = []
     private var controls: [TerminalTouchKeycap] = []
     private let background = UIView()
     private let floatingGlass = UIVisualEffectView()
     private let controlGlass = UIVisualEffectView()
     private let drawer = UIScrollView()
-    private let sections = UISegmentedControl(items: ["Symbols", "Navigation", "Shortcuts", "Custom"])
+    private let pageIndicator = UIVisualEffectView()
+    private let pageIndicatorTitle = UILabel()
+    private let pageIndicatorDots = Model.ToolPage.allCases.map { _ in UIView() }
+    private var pageIndicatorHideTask: Task<Void, Never>?
     private let presets = UISegmentedControl(items: Model.Preset.allCases.map(\.rawValue))
-    private let closeDrawerButton = UIButton(type: .system)
-    private let modeButton = UIButton(type: .system)
+    private let writingAssistanceButton = UIButton(type: .system)
     private let grabber = UIButton(type: .system)
     private var drawerButtons: [TerminalTouchRepeatingButton] = []
     private var drawerColumns = 6
@@ -280,13 +323,9 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate {
     private var compact: Bool { traitCollection.verticalSizeClass == .compact }
     private var rowHeight: CGFloat {
         if isFloating {
-            return min(44, max(28, (floatingAvailableHeight - 48 - 44 - (suggestionsEnabled ? 36 : 0) - (drawerOpen ? 90 : 0)) / 4))
+            return min(44, max(28, (floatingAvailableHeight - toolbarHeight - 44 - (suggestionsEnabled ? 36 : 0)) / 4))
         }
         return compact ? 40 : (traitCollection.userInterfaceIdiom == .pad ? 60 : 54)
-    }
-    private var drawerHeight: CGFloat {
-        if isFloating { return min(124, max(0, floatingAvailableHeight - 48 - rowHeight * 4 - 44 - (suggestionsEnabled ? 36 : 0))) }
-        return compact ? 124 : 156
     }
     private var deviceBottomInset: CGFloat {
         // An embedded settings preview must not inherit padding from the window's
@@ -297,7 +336,7 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate {
         return max(safeAreaInsets.bottom, window.safeAreaInsets.bottom)
     }
     private var bottomInset: CGFloat { isFloating ? 44 : (compactHeightEnabled ? 6 : max(6, deviceBottomInset)) }
-    private var desiredHeight: CGFloat { 48 + rowHeight * 4 + bottomInset + (drawerOpen ? drawerHeight : 0) + (suggestionsEnabled ? 36 : 0) }
+    private var desiredHeight: CGFloat { toolbarHeight + rowHeight * 4 + bottomInset + (suggestionsEnabled ? 36 : 0) }
 
     init() {
         // Supply one surface ourselves; UIKit's keyboard style adds another
@@ -324,9 +363,12 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate {
         heightConstraint = heightAnchor.constraint(equalToConstant: desiredHeight)
         heightConstraint.priority = .init(999)
         heightConstraint.isActive = true
-        sections.selectedSegmentIndex = 2
-        sections.addTarget(self, action: #selector(changeSection), for: .valueChanged)
-        addSubview(sections)
+        let pageSwipe = TerminalKeyboardPageSwipe(target: self, action: #selector(swipePage(_:)))
+        pageSwipe.delegate = self
+        pageSwipe.cancelsTouchesInView = true
+        pageSwipe.delaysTouchesBegan = false
+        addGestureRecognizer(pageSwipe)
+        drawer.panGestureRecognizer.require(toFail: pageSwipe)
         presets.selectedSegmentIndex = Model.Preset.allCases.firstIndex(of: preset) ?? 0
         presets.addTarget(self, action: #selector(changePreset), for: .valueChanged)
         presets.accessibilityLabel = String(localized: "Keyboard preset")
@@ -334,16 +376,18 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate {
         drawer.showsVerticalScrollIndicator = true
         drawer.alwaysBounceVertical = false
         addSubview(drawer)
-        closeDrawerButton.setImage(UIImage(systemName: "chevron.down", withConfiguration: UIImage.SymbolConfiguration(pointSize: 15, weight: .semibold)), for: .normal)
-        closeDrawerButton.tintColor = .label
-        closeDrawerButton.accessibilityLabel = String(localized: "Close keyboard tools")
-        closeDrawerButton.addAction(UIAction { [weak self] _ in
-            guard let self else { return }
-            self.cancelInteraction()
-            self.drawerOpen = false
-            self.rebuildDrawer()
-        }, for: .touchUpInside)
-        addSubview(closeDrawerButton)
+        pageIndicator.layer.cornerRadius = 16
+        pageIndicator.layer.cornerCurve = .continuous
+        pageIndicator.clipsToBounds = true
+        pageIndicator.isUserInteractionEnabled = false
+        pageIndicator.accessibilityElementsHidden = true
+        pageIndicator.alpha = 0
+        pageIndicatorTitle.font = .systemFont(ofSize: 14, weight: .semibold)
+        pageIndicatorTitle.textAlignment = .center
+        pageIndicatorTitle.textColor = .white
+        pageIndicator.contentView.addSubview(pageIndicatorTitle)
+        pageIndicatorDots.forEach { pageIndicator.contentView.addSubview($0) }
+        addSubview(pageIndicator)
         suggestions.axis = .horizontal
         suggestions.distribution = .fillEqually
         addSubview(suggestions)
@@ -361,17 +405,9 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate {
         accents.isUserInteractionEnabled = false
         accents.isHidden = true
         addSubview(accents)
-        modeButton.addAction(UIAction { [weak self] _ in
-            guard let self else { return }
-            self.cancelInteraction()
-            self.drawerOpen.toggle()
-            self.rebuildDrawer()
-        }, for: .touchUpInside)
-        modeButton.titleLabel?.font = .systemFont(ofSize: 12, weight: .semibold)
-        modeButton.titleLabel?.adjustsFontSizeToFitWidth = true
-        modeButton.titleLabel?.minimumScaleFactor = 0.7
-        modeButton.accessibilityLabel = String(localized: "Keyboard tools")
-        addSubview(modeButton)
+        writingAssistanceButton.showsMenuAsPrimaryAction = true
+        writingAssistanceButton.accessibilityLabel = String(localized: "Writing Assistance")
+        addSubview(writingAssistanceButton)
         grabber.setImage(UIImage(systemName: "ellipsis"), for: .normal)
         grabber.accessibilityLabel = String(localized: "Move keyboard")
         grabber.accessibilityHint = String(localized: "Drag to move. Double-tap to dock.")
@@ -387,6 +423,11 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate {
             let pinch = UIPinchGestureRecognizer(target: self, action: #selector(pinchKeyboard(_:)))
             pinch.cancelsTouchesInView = true
             addGestureRecognizer(pinch)
+        }
+        loadToolbarConfiguration()
+        if KeyboardToolbarManager.shared.drawerOpenByDefault {
+            toolbarDrawerState = .closed.toggled(rowCount: configuredDrawers.count,
+                cycle: KeyboardToolbarManager.shared.drawerToggleMode == .cycle)
         }
         rebuildKeys()
         rebuildDrawer()
@@ -442,11 +483,12 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate {
     }
 
     private func refreshPlacementActions() {
+        let keyboardSwitch = rows.flatMap { $0 }.first { $0.key.action == .switchKeyboard }
         guard traitCollection.userInterfaceIdiom == .pad, onPlacementRequested != nil else {
-            modeButton.accessibilityCustomActions = nil
+            keyboardSwitch?.accessibilityCustomActions = nil
             return
         }
-        modeButton.accessibilityCustomActions = [UIAccessibilityCustomAction(name: isFloating ? String(localized: "Dock Keyboard") : String(localized: "Float Keyboard")) { [weak self] _ in
+        keyboardSwitch?.accessibilityCustomActions = [UIAccessibilityCustomAction(name: isFloating ? String(localized: "Dock Keyboard") : String(localized: "Float Keyboard")) { [weak self] _ in
             guard let self else { return false }
             self.cancelInteraction()
             self.onPlacementRequested?(self.isFloating ? .docked : .floating)
@@ -510,7 +552,8 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate {
         if compactHeightEnabled != compactHeight || glyphsEnabled != glyphs { cancelInteraction() }
         compactHeightEnabled = compactHeight
         glyphsEnabled = glyphs
-        updateModifierAppearance()
+        loadToolbarConfiguration()
+        rebuildKeys()
         updateAppearance()
         rebuildDrawer()
         setNeedsLayout()
@@ -557,12 +600,16 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate {
         }
         controlGlass.backgroundColor = .clear
         if !usesFloatingGlass { floatingGlass.effect = nil }
+        pageIndicator.effect = UIAccessibility.isReduceTransparencyEnabled ? nil : UIBlurEffect(style: .systemUltraThinMaterialDark)
+        pageIndicator.contentView.backgroundColor = UIColor.black.withAlphaComponent(UIAccessibility.isReduceTransparencyEnabled ? 0.9 : 0.3)
         grabber.tintColor = palette?.toolbarInk ?? .label
         preview.backgroundColor = palette?.key ?? .secondarySystemBackground
         preview.textColor = palette?.ink ?? .label
         accents.backgroundColor = palette?.key ?? .secondarySystemBackground
         (controls + rows.flatMap { $0 }).forEach { $0.palette = palette }
-        refreshModeButton()
+        refreshWritingAssistance()
+        rebuildToolbarDrawers()
+        updateModifierAppearance()
         onAppearanceChanged?()
     }
 
@@ -576,10 +623,7 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate {
                 self.modifierState.end(mod, at: ProcessInfo.processInfo.systemUptime)
                 self.publishModifiers()
             } else if key.action == .joystick {
-                self.drawerOpen = true
-                self.sections.selectedSegmentIndex = 1
-                self.rebuildDrawer()
-                self.setNeedsLayout()
+                self.showPage(.navigation)
             } else { self.perform(cap.key) }
         }
         if case .text(let text) = key.action, let variants = Model.accents[text] {
@@ -595,18 +639,64 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate {
         return cap
     }
 
-    private func rebuildKeys() {
-        (controls + rows.flatMap { $0 }).forEach { $0.removeFromSuperview() }
-        controls = Model.controls.map { makeCap($0, small: true) }
-        if let modeCap = controls.first(where: { $0.key.action == .mode }) {
-            modeCap.label.isHidden = true
-            modeCap.isAccessibilityElement = false
+    private func loadToolbarConfiguration() {
+        let manager = KeyboardToolbarManager.shared
+        func key(for slot: KeySlot) -> Model.Key? {
+            switch slot {
+            case .custom(let id):
+                guard let custom = manager.customKey(for: id) else { return nil }
+                return Model.Key(title: custom.label, action: .custom(id), symbol: custom.iconName, accessibility: custom.label)
+            case .builtIn(let id):
+                guard !manager.config.hiddenKeys.contains(id) else { return nil }
+                let action: Model.Action
+                let title: String
+                switch id {
+                case .esc: action = .key("\u{1b}"); title = "Esc"
+                case .ctrl: action = .modifier(.control); title = "Ctrl"
+                case .alt: action = .modifier(.alt); title = "Alt"
+                case .shift: action = .modifier(.shift); title = "Shift"
+                case .cmd: action = .modifier(.command); title = "Cmd"
+                case .tab: action = .key("\t"); title = "Tab"
+                case .arrowDrawerToggle: action = .joystick; title = id.displayName
+                case .drawerToggle: action = .drawer; title = "…"
+                case .dismiss: action = .dismiss; title = id.displayName
+                case .tabSwitcher: action = .tabs; title = id.displayName
+                case .compose: action = .compose; title = id.displayName
+                case .paste: action = .paste; title = id.displayName
+                default:
+                    title = id.category == .symbol ? id.keyValue : id.displayName
+                    action = id.category == .symbol ? .text(id.keyValue)
+                        : (id.category == .navigation ? .key(id.keyValue) : .toolbar(id.keyValue))
+                }
+                return Model.Key(title: title, action: action, symbol: id.iconName, accessibility: id.displayName)
+            }
         }
-        bringSubviewToFront(modeButton)
+        configuredDrawerToggle = key(for: .builtIn(.drawerToggle))
+        configuredMain = manager.config.mainRow.compactMap(key)
+        configuredDrawers = manager.config.drawerRows.map { $0.compactMap(key) }
+        if manager.drawerOpenByDefault && !toolbarDrawerOpenByDefault && toolbarDrawerState == .closed {
+            toolbarDrawerState = .closed.toggled(rowCount: configuredDrawers.count, cycle: manager.drawerToggleMode == .cycle)
+        }
+        toolbarDrawerOpenByDefault = manager.drawerOpenByDefault
+    }
+
+    private func rebuildKeys() { rebuildKeysForWidth(max(0, bounds.width - safeAreaInsets.left - safeAreaInsets.right)) }
+
+    private func rebuildKeysForWidth(_ width: CGFloat) {
+        (controls + rows.flatMap { $0 }).forEach { $0.removeFromSuperview() }
+        let toolbar = Model.toolbarKeys(main: configuredMain, drawers: configuredDrawers, width: width, drawerToggle: configuredDrawerToggle)
+        controls = toolbar.main.map { makeCap($0, small: true) }
+        toolbarDrawerKeys = toolbar.drawers
+        rebuildToolbarDrawers()
+        if let cap = controls.first(where: { $0.key.action == .toolbar(KeyID.writingAssistance.keyValue) }) {
+            cap.isAccessibilityElement = false
+        }
+        bringSubviewToFront(writingAssistanceButton)
         rows = Model.rows(page: page).map { $0.map { makeCap($0) } }
         bringSubviewToFront(preview)
         bringSubviewToFront(accents)
         updateModifierAppearance()
+        refreshPlacementActions()
         setNeedsLayout()
     }
 
@@ -616,49 +706,76 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate {
         if previousWidth != bounds.width {
             if previousWidth != 0 { cancelInteraction() }
             previousWidth = bounds.width
+            rebuildKeys()
+            rebuildDrawer()
         }
         let leading = isFloating ? 0 : max(safeAreaInsets.left, window?.safeAreaInsets.left ?? 0)
         let trailing = isFloating ? 0 : max(safeAreaInsets.right, window?.safeAreaInsets.right ?? 0)
         let width = max(0, bounds.width - leading - trailing)
-        background.frame = isFloating ? bounds : CGRect(x: 0, y: 48, width: bounds.width, height: max(0, bounds.height - 48))
+        background.frame = isFloating ? bounds : CGRect(x: 0, y: toolbarHeight, width: bounds.width, height: max(0, bounds.height - toolbarHeight))
         background.layer.maskedCorners = isFloating ? [.layerMinXMinYCorner, .layerMaxXMinYCorner, .layerMinXMaxYCorner, .layerMaxXMaxYCorner] : [.layerMinXMinYCorner, .layerMaxXMinYCorner]
         if isFloating { layer.shadowPath = UIBezierPath(roundedRect: bounds, cornerRadius: 24).cgPath }
         grabber.isHidden = !isFloating
         grabber.frame = CGRect(x: (bounds.width - 88) / 2, y: bounds.height - 44, width: 88, height: 44)
-        controlGlass.frame = CGRect(x: leading + 2, y: 2, width: max(0, width - 4), height: 44)
-        for (cap, rect) in zip(controls, Model.frames(keys: controls.map(\.key), width: width, y: 0, height: 48, inset: 5)) { cap.frame = rect.offsetBy(dx: leading, dy: 0) }
-        if let modeCap = controls.first(where: { $0.key.action == .mode }) {
-            modeButton.frame = modeCap.frame.insetBy(dx: 4, dy: 5)
+        controlGlass.frame = CGRect(x: leading + 2, y: 2, width: max(0, width - 4), height: toolbarHeight - 4)
+        let toolbar = Model.toolbarKeys(main: configuredMain, drawers: configuredDrawers, width: width, drawerToggle: configuredDrawerToggle)
+        if controls.map(\.key) != toolbar.main || toolbarDrawerKeys != toolbar.drawers {
+            cancelInteraction()
+            rebuildKeysForWidth(width)
+            rebuildDrawer()
+            setNeedsLayout()
         }
-        var y: CGFloat = 48
-        sections.isHidden = !drawerOpen
-        drawer.isHidden = !drawerOpen
-        presets.isHidden = !drawerOpen || sections.selectedSegmentIndex != 2
-        closeDrawerButton.isHidden = !drawerOpen
-        if drawerOpen {
-            sections.frame = CGRect(x: leading + 8, y: y + 3, width: max(0, width - 60), height: 30)
-            closeDrawerButton.frame = CGRect(x: leading + width - 48, y: y - 2, width: 44, height: 44)
-            y += 40
-            let presetHeight: CGFloat = sections.selectedSegmentIndex == 2 ? 32 : 0
-            if presetHeight > 0 {
-                presets.frame = CGRect(x: leading + 8, y: y, width: width - 16, height: 28)
-                y += presetHeight
+        for (cap, rect) in zip(controls, Model.frames(keys: controls.map(\.key), width: width, y: toolbarDrawerHeight, height: 48, inset: 5)) { cap.frame = rect.offsetBy(dx: leading, dy: 0) }
+        if let cap = controls.first(where: { $0.key.action == .toolbar(KeyID.writingAssistance.keyValue) }) {
+            writingAssistanceButton.frame = cap.frame
+            writingAssistanceButton.isHidden = false
+        } else { writingAssistanceButton.isHidden = true }
+        for (index, row) in toolbarDrawerRows.enumerated() {
+            row.frame = CGRect(x: leading + 5, y: CGFloat(index) * 44, width: max(0, width - 10), height: 44)
+            var x: CGFloat = 0
+            for button in toolbarDrawerButtons[index] {
+                let titleWidth = ((button.configuration?.title ?? "") as NSString).size(withAttributes: [.font: UIFont.systemFont(ofSize: 13)]).width
+                let buttonWidth = max(40, min(120, titleWidth + 20))
+                button.frame = CGRect(x: x, y: 2, width: buttonWidth, height: 40)
+                x += buttonWidth + 2
             }
-            drawer.frame = CGRect(x: leading + 5, y: y, width: width - 10, height: drawerHeight - 44 - presetHeight)
+            row.contentSize = CGSize(width: x, height: 44)
+        }
+        var y = toolbarHeight
+        let contentHeight = rowHeight * 4 + (suggestionsEnabled ? 36 : 0)
+        // This HUD floats over the keys; it never contributes to keyboard height.
+        pageIndicator.frame = CGRect(x: leading + (width - 160) / 2, y: toolbarHeight + (contentHeight - 64) / 2, width: 160, height: 64)
+        pageIndicatorTitle.frame = CGRect(x: 8, y: 10, width: 144, height: 22)
+        let dotSpacing: CGFloat = 14
+        for (index, dot) in pageIndicatorDots.enumerated() {
+            let size: CGFloat = index == toolPage.rawValue ? 8 : 6
+            dot.frame = CGRect(x: 80 + (CGFloat(index) - CGFloat(pageIndicatorDots.count - 1) / 2) * dotSpacing - size / 2,
+                               y: 45 - size / 2, width: size, height: size)
+            dot.layer.cornerRadius = size / 2
+            dot.backgroundColor = UIColor.white.withAlphaComponent(index == toolPage.rawValue ? 1 : 0.4)
+        }
+        drawer.isHidden = !drawerOpen
+        presets.isHidden = toolPage != .shortcuts
+        if drawerOpen {
+            if toolPage == .shortcuts {
+                presets.frame = CGRect(x: leading + 8, y: y + 3, width: max(0, width - 16), height: 30)
+            }
+            let presetHeight: CGFloat = toolPage == .shortcuts ? 38 : 0
+            drawer.frame = CGRect(x: leading + 5, y: y + presetHeight, width: max(0, width - 10), height: max(0, contentHeight - presetHeight))
             let cellWidth = drawer.bounds.width / CGFloat(drawerColumns)
-            let cellHeight: CGFloat = compact ? 38 : 46
+            let cellHeight: CGFloat = compact ? 40 : 46
             for (i, button) in drawerButtons.enumerated() {
                 button.frame = CGRect(x: CGFloat(i % drawerColumns) * cellWidth + 2, y: CGFloat(i / drawerColumns) * cellHeight + 2,
-                                      width: cellWidth - 4, height: cellHeight - 4)
+                                      width: max(0, cellWidth - 4), height: cellHeight - 4)
             }
             drawer.contentSize = CGSize(width: drawer.bounds.width, height: CGFloat((drawerButtons.count + drawerColumns - 1) / drawerColumns) * cellHeight)
-            y = 48 + drawerHeight
         }
-        suggestions.isHidden = !suggestionsEnabled
+        suggestions.isHidden = !suggestionsEnabled || drawerOpen
         if suggestionsEnabled {
             suggestions.frame = CGRect(x: leading + 8, y: y, width: width - 16, height: 36)
             y += 36
         }
+        rows.flatMap { $0 }.forEach { $0.isHidden = drawerOpen }
         let typingTop = y
         for (index, row) in rows.enumerated() {
             var inset: CGFloat = index == 1 && page == .letters ? width / 20 + 2 : 2
@@ -691,15 +808,15 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate {
 
     override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
         guard bounds.contains(point) else { return nil }
-        if modeButton.frame.contains(point) {
-            return modeButton.hitTest(convert(point, to: modeButton), with: event)
+        if !writingAssistanceButton.isHidden, writingAssistanceButton.frame.contains(point) {
+            return writingAssistanceButton.hitTest(convert(point, to: writingAssistanceButton), with: event)
         }
         if cap(at: point) != nil { return self }
         return super.hitTest(point, with: event)
     }
     private func cap(at point: CGPoint) -> TerminalTouchKeycap? {
         if let control = controls.first(where: { $0.frame.contains(point) }) { return control }
-        guard let index = typingGeometry.hit(at: point) else { return nil }
+        guard !drawerOpen, let index = typingGeometry.hit(at: point) else { return nil }
         return rows.flatMap { $0 }[index]
     }
     private func feedback() {
@@ -709,6 +826,7 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate {
     }
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        hidePageIndicator()
         guard canSend else { return }
         sequenceTask?.cancel()
         for touch in touches.sorted(by: { $0.timestamp < $1.timestamp }) {
@@ -750,7 +868,7 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate {
                         contact.consumed = true
                         while !Task.isCancelled, self.contacts[id] === contact, self.canSend {
                             self.perform(key.key)
-                            try? await Task.sleep(for: .milliseconds(65))
+                            try? await Task.sleep(for: .milliseconds(45))
                         }
                     case .text(" "):
                         contact.trackpad = true
@@ -805,7 +923,7 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate {
                             try? await Task.sleep(for: .milliseconds(320))
                             while !Task.isCancelled, let self, let contact, contact.direction == direction, self.canSend {
                                 self.keyPressed(direction, modifiers: [])
-                                try? await Task.sleep(for: .milliseconds(80))
+                                try? await Task.sleep(for: .milliseconds(55))
                             }
                         }
                     }
@@ -921,16 +1039,17 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate {
         refreshContactFeedback()
     }
 
-    func cancelInteraction() {
+    func cancelInteraction(preservingModifiers: Bool = false) {
+        hidePageIndicator()
         contacts.values.forEach { $0.task?.cancel(); $0.initial.pressed = false; $0.current?.pressed = false }
         contacts.removeAll()
-        drawerButtons.forEach { $0.cancelRepeat() }
+        (drawerButtons + toolbarDrawerButtons.flatMap { $0 }).forEach { $0.cancelRepeat() }
         sequenceTask?.cancel(); sequenceTask = nil
         suggestionTask?.cancel(); suggestionTask = nil
         predictionTask?.cancel(); predictionTask = nil; pendingPrediction = nil
         lastSuggestionContext = nil
         suggestions.arrangedSubviews.forEach { $0.removeFromSuperview() }
-        modifierState.reset()
+        if preservingModifiers { modifierState.cancelHeld() } else { modifierState.reset() }
         publishModifiers()
         preview.isHidden = true
         accents.isHidden = true
@@ -941,7 +1060,13 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate {
         updateModifierAppearance()
     }
     private func updateModifierAppearance() {
+        for (button, modifier) in toolbarDrawerModifiers {
+            button.isSelected = modifierState.isActive(modifier)
+            button.configuration?.baseBackgroundColor = button.isSelected ? (palette?.toolbarInk ?? .label).withAlphaComponent(0.2) : .clear
+            button.accessibilityValue = modifierState.locked.contains(modifier) ? "Locked" : (button.isSelected ? "On" : "Off")
+        }
         for cap in controls + rows.flatMap({ $0 }) {
+            if cap.key.action == .drawer { cap.selected = toolbarDrawerState != .closed }
             switch cap.key.action {
             case .key("\u{1b}"): cap.setSymbol(glyphsEnabled ? "escape" : nil)
             case .key("\t"): cap.setSymbol(glyphsEnabled ? "arrow.right.to.line" : nil)
@@ -983,14 +1108,25 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate {
             rebuildKeys()
         case .switchKeyboard: cancelInteraction(); onSwitchKeyboard?()
         case .drawer:
-            drawerOpen.toggle(); rebuildDrawer(); setNeedsLayout()
+            cancelInteraction(preservingModifiers: true)
+            toolbarDrawerState = toolbarDrawerState.toggled(rowCount: toolbarDrawerKeys.count,
+                cycle: KeyboardToolbarManager.shared.drawerToggleMode == .cycle)
+            rebuildToolbarDrawers()
+            updateModifierAppearance()
+            setNeedsLayout()
         case .dismiss: cancelInteraction(); onDismiss?()
         case .compose: cancelInteraction(); onCompose?()
         case .paste: cancelInteraction(); onPaste?()
         case .tabs: cancelInteraction(); onTabs?()
-        case .mode: break
-        case .joystick:
-            drawerOpen = true; sections.selectedSegmentIndex = 1; rebuildDrawer(); setNeedsLayout()
+        case .toolbar(let action):
+            guard action != KeyID.writingAssistance.keyValue else { return }
+            cancelInteraction(); onToolbarAction?(action)
+        case .custom(let id):
+            guard let custom = KeyboardToolbarManager.shared.customKey(for: id) else { return }
+            if let character = custom.plainCharacter {
+                perform(Model.Key(title: String(character), action: .text(String(character))))
+            } else { sendCustomSequence(custom.sequence) }
+        case .joystick: showPage(.navigation)
         case .modifier: break
         }
     }
@@ -1036,13 +1172,77 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate {
         }
     }
 
-    @objc private func changeSection() { rebuildDrawer(); setNeedsLayout() }
+    private func showPage(_ page: Model.ToolPage) {
+        guard page != toolPage else { return }
+        cancelInteraction(preservingModifiers: true)
+        toolPage = page
+        rebuildDrawer()
+        updateSuggestions()
+        showPageIndicator()
+        UIAccessibility.post(notification: .pageScrolled, argument: page.title)
+    }
+
+    private func showPageIndicator() {
+        pageIndicatorHideTask?.cancel()
+        pageIndicatorTitle.text = toolPage.title
+        bringSubviewToFront(pageIndicator)
+        setNeedsLayout()
+        UIView.animate(withDuration: UIAccessibility.isReduceMotionEnabled ? 0 : 0.15,
+                       delay: 0, options: [.beginFromCurrentState, .allowUserInteraction]) {
+            self.pageIndicator.alpha = 1
+        }
+        // Match the hidden-tab-bar indicator's 1.5-second display and fade.
+        pageIndicatorHideTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(1500))
+            guard !Task.isCancelled, let self else { return }
+            UIView.animate(withDuration: UIAccessibility.isReduceMotionEnabled ? 0 : 0.3,
+                           delay: 0, options: [.beginFromCurrentState, .allowUserInteraction]) {
+                self.pageIndicator.alpha = 0
+            }
+        }
+    }
+
+    private func hidePageIndicator() {
+        pageIndicatorHideTask?.cancel()
+        pageIndicatorHideTask = nil
+        pageIndicator.layer.removeAllAnimations()
+        pageIndicator.alpha = 0
+    }
+
+    @objc private func swipePage(_ gesture: TerminalKeyboardPageSwipe) {
+        showPage(toolPage.moved(by: gesture.offset))
+    }
+
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+        guard gestureRecognizer is TerminalKeyboardPageSwipe else { return true }
+        let point = touch.location(in: self)
+        // Toolbar joysticks, presets, and the floating handle
+        // keep their own gestures. Only the key surface changes pages.
+        guard point.y >= toolbarHeight, point.y < bounds.height - bottomInset,
+              touch.view !== presets, touch.view?.isDescendant(of: presets) != true else { return false }
+        return !contacts.values.contains { $0.trackpad || $0.accent || $0.consumed }
+    }
+
+    override func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+        guard gestureRecognizer is TerminalKeyboardPageSwipe else { return super.gestureRecognizerShouldBegin(gestureRecognizer) }
+        // A held Space or accent selection owns the contact even if its drag
+        // later travels far enough to look like a page swipe.
+        return !contacts.values.contains { $0.trackpad || $0.accent || $0.consumed }
+    }
+
+    override func accessibilityScroll(_ direction: UIAccessibilityScrollDirection) -> Bool {
+        guard direction == .left || direction == .right else { return super.accessibilityScroll(direction) }
+        showPage(toolPage.moved(by: direction == .left ? 1 : -1))
+        return true
+    }
     @objc private func changePreset() {
         guard Model.Preset.allCases.indices.contains(presets.selectedSegmentIndex) else { return }
         preset = Model.Preset.allCases[presets.selectedSegmentIndex]
         rebuildDrawer()
     }
-    private func drawerButton(_ title: String, subtitle: String? = nil, repeats: Bool = false, action: @escaping () -> Void) {
+    @discardableResult
+    private func drawerButton(_ title: String, subtitle: String? = nil, repeats: Bool = false,
+                              in container: UIView? = nil, action: @escaping () -> Void) -> TerminalTouchRepeatingButton {
         let button = TerminalTouchRepeatingButton(type: .system)
         var config = palette == nil ? UIButton.Configuration.tinted() : UIButton.Configuration.filled()
         config.title = title
@@ -1052,39 +1252,58 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate {
         config.cornerStyle = .medium
         config.contentInsets = NSDirectionalEdgeInsets(top: 2, leading: 3, bottom: 2, trailing: 3)
         config.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { input in
-            var output = input; output.font = .systemFont(ofSize: subtitle == nil ? 17 : 12, weight: .medium); return output
+            var output = input; output.font = .systemFont(ofSize: subtitle == nil && title.count <= 4 ? 17 : 12, weight: .medium); return output
         }
         config.subtitleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { input in
             var output = input; output.font = .monospacedSystemFont(ofSize: 12, weight: .regular); return output
         }
         button.configuration = config
+        button.titleLabel?.numberOfLines = 2
         button.accessibilityLabel = [title, subtitle].compactMap { $0 }.joined(separator: ", ")
         button.addAction(UIAction { [weak self] _ in guard self?.canSend == true else { return }; action() }, for: .touchUpInside)
         if repeats { button.enableRepeat { [weak self] in guard self?.canSend == true else { return }; action() } }
-        drawer.addSubview(button)
-        drawerButtons.append(button)
+        (container ?? drawer).addSubview(button)
+        if container == nil { drawerButtons.append(button) }
+        return button
     }
-    private func refreshModeButton() {
-        modeButton.setTitle(preset.rawValue + (drawerOpen ? " ⌃" : " ⌄"), for: .normal)
-        modeButton.setTitleColor(palette?.toolbarInk ?? UIColor { traits in
-            UIColor(white: Model.keyColors(dark: traits.userInterfaceStyle == .dark,
-                character: false, pressed: false, selected: false).ink, alpha: 1)
-        }, for: .normal)
-        modeButton.accessibilityValue = preset.rawValue + (drawerOpen ? ", expanded" : ", collapsed")
+    private func refreshWritingAssistance() {
+        let enabled = [
+            (SettingsStore.shared.value(Settings.Keyboard.touchLetterPrediction), String(localized: "Letter Prediction")),
+            (SettingsStore.shared.value(Settings.Keyboard.touchSuggestions), String(localized: "Suggestions")),
+            (SettingsStore.shared.value(Settings.Keyboard.doubleSpaceForPeriod), String(localized: "Double-Space Period Shortcut"))
+        ].filter { $0.0 }.map { $0.1 }
+        writingAssistanceButton.accessibilityValue = enabled.isEmpty ? String(localized: "Off") : enabled.joined(separator: ", ")
+        writingAssistanceButton.menu = writingAssistanceMenu()
+    }
+
+    private func writingAssistanceMenu() -> UIMenu {
+        func toggle(_ setting: SettingKey<Bool>, title: String, icon: String) -> UIAction {
+            UIAction(title: title, image: UIImage(systemName: icon),
+                     state: SettingsStore.shared.value(setting) ? .on : .off) { _ in
+                let store = SettingsStore.shared
+                store.set(setting, !store.value(setting))
+            }
+        }
+        return UIMenu(children: [
+            toggle(Settings.Keyboard.touchLetterPrediction, title: String(localized: "Letter Prediction"), icon: "textformat.abc"),
+            toggle(Settings.Keyboard.touchSuggestions, title: String(localized: "Suggestions"), icon: "text.bubble"),
+            toggle(Settings.Keyboard.doubleSpaceForPeriod, title: String(localized: "Double-Space Period Shortcut"), icon: "character.cursor.ibeam")
+        ])
     }
 
     private func rebuildDrawer() {
-        refreshModeButton()
+        refreshWritingAssistance()
         drawerButtons.forEach { $0.cancelRepeat(); $0.removeFromSuperview() }; drawerButtons.removeAll()
         drawer.contentOffset = .zero
-        drawerColumns = sections.selectedSegmentIndex == 0 ? 8 : 4
-        switch sections.selectedSegmentIndex {
-        case 0:
+        drawerColumns = toolPage == .symbols ? 8 : 4
+        switch toolPage {
+        case .typing: break
+        case .symbols:
             for char in "`~^_\\|[]{}<>/=-\"';:()@$%&*+?!#" {
                 let text = String(char)
                 drawerButton(text) { [weak self] in self?.perform(Model.Key(title: text, action: .text(text))) }
             }
-        case 1:
+        case .navigation:
             let keys = [("←", "\u{1b}[D"), ("↓", "\u{1b}[B"), ("↑", "\u{1b}[A"), ("→", "\u{1b}[C"),
                         ("Home", "\u{1b}[H"), ("End", "\u{1b}[F"), ("PgUp", "\u{1b}[5~"), ("PgDn", "\u{1b}[6~"), ("Delete", "\u{1b}[3~")]
             for (title, key) in keys { drawerButton(title, repeats: true) { [weak self] in self?.keyPressed(key, modifiers: []) } }
@@ -1093,7 +1312,7 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate {
                 guard let self else { return }; self.modifierState.begin(.command)
                 self.modifierState.end(.command, at: ProcessInfo.processInfo.systemUptime); self.publishModifiers()
             }
-        case 2:
+        case .shortcuts:
             for shortcut in preset.shortcuts {
                 drawerButton(shortcut.title, subtitle: shortcut.chord) { [weak self] in
                     self?.keyPressed(shortcut.key, modifiers: KeyModifiers(rawValue: shortcut.modifiers))
@@ -1103,17 +1322,66 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate {
                 drawerButton("Compose") { [weak self] in self?.perform(Model.Key(title: "Compose", action: .compose)) }
                 drawerButton("Paste") { [weak self] in self?.perform(Model.Key(title: "Paste", action: .paste)) }
             }
-        default:
-            for key in KeyboardToolbarManager.shared.customKeys {
-                drawerButton(key.label, subtitle: key.sequenceSummary) { [weak self] in self?.sendCustomSequence(key.sequence) }
+        }
+        updateModifierAppearance()
+        setNeedsLayout()
+    }
+
+    private func rebuildToolbarDrawers() {
+        toolbarDrawerButtons.flatMap { $0 }.forEach { $0.cancelRepeat() }
+        toolbarDrawerRows.forEach { $0.removeFromSuperview() }
+        toolbarDrawerRows.removeAll()
+        toolbarDrawerButtons.removeAll()
+        toolbarDrawerModifiers.removeAll()
+        toolbarDrawerState = toolbarDrawerState.clamped(rowCount: toolbarDrawerKeys.count)
+        for index in toolbarDrawerState.visibleRows(rowCount: toolbarDrawerKeys.count) {
+            let row = UIScrollView()
+            row.showsHorizontalScrollIndicator = false
+            row.alwaysBounceHorizontal = false
+            addSubview(row)
+            toolbarDrawerRows.append(row)
+            var buttons: [TerminalTouchRepeatingButton] = []
+            for key in toolbarDrawerKeys[index] {
+                let repeats: Bool = { if case .key = key.action { return true }; return false }()
+                let button = drawerButton(key.title, repeats: repeats, in: row) { [weak self] in
+                    guard let self else { return }
+                    if case .modifier(let modifier) = key.action {
+                        self.modifierState.begin(modifier)
+                        self.modifierState.end(modifier, at: ProcessInfo.processInfo.systemUptime)
+                        self.publishModifiers()
+                    } else { self.perform(key) }
+                }
+                var config = button.configuration!
+                config.baseBackgroundColor = .clear
+                config.baseForegroundColor = palette?.toolbarInk ?? .label
+                let usesGlyph: Bool = {
+                    switch key.action {
+                    case .modifier, .key("\u{1b}"), .key("\t"): return glyphsEnabled
+                    default: return true
+                    }
+                }()
+                if let symbol = key.symbol, usesGlyph,
+                   let image = UIImage(systemName: symbol, withConfiguration: UIImage.SymbolConfiguration(pointSize: 17)) {
+                    config.title = nil
+                    config.image = image
+                }
+                button.configuration = config
+                button.accessibilityLabel = key.accessibility ?? key.title
+                if case .modifier(let modifier) = key.action { toolbarDrawerModifiers[button] = modifier }
+                if key.action == .toolbar(KeyID.writingAssistance.keyValue) {
+                    button.showsMenuAsPrimaryAction = true
+                    button.menu = writingAssistanceMenu()
+                }
+                buttons.append(button)
             }
-            drawerButton("Edit keys", subtitle: "Customize") { [weak self] in self?.cancelInteraction(); self?.onCustomize?() }
+            toolbarDrawerButtons.append(buttons)
         }
         setNeedsLayout()
     }
 
     private func sendCustomSequence(_ steps: [SequenceStep]) {
-        cancelInteraction()
+        modifierState.consume()
+        cancelInteraction(preservingModifiers: true)
         host?.touchKeyboardInvalidateSuggestions()
         sequenceTask = Task { @MainActor [weak self] in
             for step in steps {

@@ -1,6 +1,27 @@
 import Foundation
 import CoreGraphics
 
+/// One partition for the system toolbar and the touch keyboard. Runtime buttons
+/// reserve main-row slots without changing the user's saved configuration.
+nonisolated enum KeyboardToolbarOverflow {
+    static func layout<Slot: Equatable>(main: [Slot], drawers: [[Slot]], capacity: Int,
+                                       reservedSlots: Int = 0, drawerToggle: Slot,
+                                       keepsDrawerToggleVisible: Bool) -> (main: [Slot], drawers: [[Slot]]) {
+        let available = max(1, capacity - max(0, reservedSlots))
+        var visible = Array(main.prefix(available))
+        var overflow = Array(main.dropFirst(available))
+        var rows = drawers.isEmpty ? [[]] : drawers
+        let hasContent = (overflow + rows.flatMap { $0 }).contains { $0 != drawerToggle }
+        if hasContent, keepsDrawerToggleVisible, !visible.contains(drawerToggle) {
+            if visible.count == available { overflow.insert(visible.removeLast(), at: 0) }
+            visible.append(drawerToggle)
+        }
+        rows[0] = overflow + rows[0]
+        rows = rows.map { $0.filter { $0 != drawerToggle } }
+        return (visible, rows)
+    }
+}
+
 /// Platform-independent behavior shared by the touch surface and its tests.
 nonisolated enum TerminalTouchKeyboardModel {
     enum Modifier: Int, CaseIterable, Sendable {
@@ -49,13 +70,15 @@ nonisolated enum TerminalTouchKeyboardModel {
             for modifier in consumed { lastTap[modifier] = nil }
         }
 
+        mutating func cancelHeld() { held.removeAll(); used.removeAll() }
         mutating func reset() { self = Self() }
     }
 
     enum Page: CaseIterable { case letters, numbers, symbols }
     enum Action: Hashable {
         case text(String), key(String), modifier(Modifier)
-        case page, switchKeyboard, drawer, dismiss, joystick, compose, paste, tabs, mode
+        case page, switchKeyboard, drawer, dismiss, joystick, compose, paste, tabs
+        case toolbar(String), custom(UUID)
     }
 
     struct Key: Hashable {
@@ -266,17 +289,71 @@ nonisolated enum TerminalTouchKeyboardModel {
         mutating func removeAll() { values.removeAll(); order.removeAll() }
     }
 
-    static let controls: [Key] = [
-        Key(title: "Esc", action: .key("\u{1b}"), accessibility: "Escape"),
-        Key(title: "Tab", action: .key("\t")),
-        Key(title: "Ctrl", action: .modifier(.control), accessibility: "Control"),
-        Key(title: "Alt", action: .modifier(.alt)),
-        Key(title: "Arrows", action: .joystick, symbol: "arrow.up.and.down.and.arrow.left.and.right",
-            accessibility: "Arrow joystick. Drag to move, or activate for navigation keys."),
-        Key(title: "Tabs", action: .tabs, symbol: "sidebar.left", accessibility: "Vertical Tab Menu"),
-        Key(title: "Mode", action: .mode, weight: 1.3, accessibility: "Keyboard Mode and Tools"),
-        Key(title: "Hide", action: .dismiss, symbol: "keyboard.chevron.compact.down", accessibility: "Hide keyboard. Hold to pin hidden.")
-    ]
+    enum ToolPage: Int, CaseIterable {
+        case typing, symbols, navigation, shortcuts
+
+        var title: String {
+            switch self {
+            case .typing: return String(localized: "Keyboard")
+            case .symbols: return String(localized: "Symbols")
+            case .navigation: return String(localized: "Navigation")
+            case .shortcuts: return String(localized: "Shortcuts")
+            }
+        }
+
+        func moved(by offset: Int) -> Self {
+            let count = Self.allCases.count
+            return Self(rawValue: (rawValue + offset % count + count) % count)!
+        }
+    }
+
+    /// A deliberate horizontal stroke changes pages; ordinary key correction
+    /// and vertical scrolling do not. The view excludes contacts owned by holds.
+    static func pageSwipe(translation: CGPoint) -> Int? {
+        guard abs(translation.x) >= 70, abs(translation.x) > abs(translation.y) * 2 else { return nil }
+        return translation.x < 0 ? 1 : -1
+    }
+
+    enum ToolbarDrawerState: Equatable {
+        case closed, stacked(Int), cycling(Int)
+
+        func toggled(rowCount: Int, cycle: Bool) -> Self {
+            guard rowCount > 0 else { return .closed }
+            switch self {
+            case .closed: return cycle ? .cycling(0) : .stacked(1)
+            case .stacked(let count): return !cycle && count < rowCount ? .stacked(count + 1) : .closed
+            case .cycling(let index): return cycle && index + 1 < rowCount ? .cycling(index + 1) : .closed
+            }
+        }
+
+        func clamped(rowCount: Int) -> Self {
+            guard rowCount > 0 else { return .closed }
+            switch self {
+            case .closed: return .closed
+            case .stacked(let count): return .stacked(min(count, rowCount))
+            case .cycling(let index): return .cycling(min(index, rowCount - 1))
+            }
+        }
+
+        func visibleRows(rowCount: Int) -> [Int] {
+            guard rowCount > 0 else { return [] }
+            switch self {
+            case .closed: return []
+            case .stacked(let count): return Array((0..<min(count, rowCount)).reversed())
+            case .cycling(let index): return [min(index, rowCount - 1)]
+            }
+        }
+    }
+
+    /// Keep configured rows intact. Main-row overflow joins the first drawer,
+    /// including a button displaced to keep the drawer toggle reachable.
+    static func toolbarKeys(main: [Key], drawers: [[Key]], width: CGFloat,
+                            drawerToggle: Key? = nil) -> (main: [Key], drawers: [[Key]]) {
+        KeyboardToolbarOverflow.layout(main: main, drawers: drawers,
+            capacity: max(1, Int(max(0, width - 10) / 40)),
+            drawerToggle: drawerToggle ?? Key(title: "…", action: .drawer),
+            keepsDrawerToggleVisible: drawerToggle != nil)
+    }
 
     /// Contrast is computed in linear light, after decoding the sRGB channels.
     struct RGB: Equatable {

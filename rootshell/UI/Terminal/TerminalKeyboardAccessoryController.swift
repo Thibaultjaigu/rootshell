@@ -193,6 +193,9 @@ final class TerminalKeyboardAccessoryController: NSObject {
         keyboard.onPaste = { [weak self] in self?.host?.keyboardPaste() }
         keyboard.onTabs = { [weak self] in self?.keyboardAccessory?.onTabSwitcherRequested?() }
         keyboard.onCustomize = { [weak self] in self?.keyboardAccessory?.onToolbarSettingsRequested?() }
+        keyboard.onToolbarAction = { [weak self] action in
+            self?.keyboardAccessory?.toolbarView.keyPressed(action, modifiers: [])
+        }
         keyboard.onHeightChanged = { [weak self] in
             guard let self else { return }
             self.touchKeyboardInputView?.updateHeight()

@@ -75,10 +75,10 @@ struct TerminalTouchKeyboardSettingsView: View {
                         .themedRow()
                 }
                 NavigationLink(value: SettingsSearchDestination.toolbarKeys) {
-                    Label("Custom Shortcut Keys", systemImage: "command")
+                    Label("Customize Toolbar", systemImage: "command")
                 }
                 .themedRow()
-                Text("Tap the mode button above the keys to choose Agent, Shell, Vim, Emacs, or Nano, or open symbols, navigation, and function keys. Shortcuts use each application's standard bindings; customized bindings may behave differently.")
+                Text("Swipe left or right across the keys to reach Symbols, Navigation, and Shortcuts. A temporary overlay shows your position. The toolbar follows your customized button layout. Tap … to open your custom drawer rows, using the same stack or cycle setting as the regular keyboard toolbar. Choose Agent, Shell, Vim, Emacs, or Nano on the Shortcuts page. Shortcuts use each application's standard bindings; customized bindings may behave differently.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .themedRow()

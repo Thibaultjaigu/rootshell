@@ -27,13 +27,13 @@ nonisolated extension Settings {
             "terminalTouchKeyboardHaptics", default: false, group: .keyboard, policy: .localByDefault,
             configKey: "terminal-touch-keyboard-haptics", title: String(localized: "Terminal Keyboard Haptics"))
         static let touchCompactHeight = SettingKey(
-            "terminalTouchKeyboardCompactHeight", default: false, group: .keyboard, policy: .localByDefault,
+            "terminalTouchKeyboardCompactHeight", default: true, group: .keyboard, policy: .localByDefault,
             configKey: "terminal-touch-keyboard-compact-height", title: String(localized: "Compact Keyboard Height"))
         static let touchGlyphs = SettingKey(
             "terminalTouchKeyboardGlyphs", default: true, group: .keyboard, policy: .localByDefault,
             configKey: "terminal-touch-keyboard-glyphs", title: String(localized: "Keyboard Key Glyphs"))
         static let touchThemeAware = SettingKey(
-            "terminalTouchKeyboardThemeAware", default: false, group: .keyboard, policy: .localByDefault,
+            "terminalTouchKeyboardThemeAware", default: true, group: .keyboard, policy: .localByDefault,
             configKey: "terminal-touch-keyboard-theme-aware", title: String(localized: "Follow Terminal Theme"))
 
         static let writingAssistance = SettingKey(

@@ -320,6 +320,7 @@ class KeyboardToolbarView: UIView {
 
     /// Track last known width to detect meaningful size changes
     private var lastBuiltWidth: CGFloat = 0
+    private var effectiveDrawerRows: [[KeySlot]] = [[]]
 
     // MARK: - Initialization
 
@@ -579,15 +580,15 @@ class KeyboardToolbarView: UIView {
         let edgePadding = currentEdgePadding()
         let chromeInsets = currentChromeHorizontalInsets()
         let availableWidth = width - edgePadding * 2 - chromeInsets.left - chromeInsets.right
-        let switchWidth = onTouchKeyboardRequested == nil ? 0 : sizes.button.wideWidth + sizes.toolbar.spacing
-        let mainSlots = manager.effectiveMainRowSlots(availableWidth: availableWidth - switchWidth)
+        let layout = manager.effectiveLayout(availableWidth: availableWidth,
+            reservedMainRowSlots: onTouchKeyboardRequested == nil ? 0 : 1, sizes: sizes)
+        effectiveDrawerRows = layout.drawers
+        let mainSlots = layout.main
         if onTouchKeyboardRequested != nil {
-            let button = UIButton(type: .system)
-            button.setImage(UIImage(systemName: "keyboard.badge.ellipsis"), for: .normal)
-            button.tintColor = .label
+            let button = KeyboardSymbolButton(key: "__touchKeyboard__",
+                display: .icon("keyboard.badge.ellipsis"), sizes: sizes)
             button.accessibilityLabel = String(localized: "Use Terminal Keyboard")
-            button.widthAnchor.constraint(equalToConstant: sizes.button.wideWidth).isActive = true
-            button.addAction(UIAction { [weak self] _ in self?.onTouchKeyboardRequested?() }, for: .touchUpInside)
+            button.delegate = self
             mainRowStackView.addArrangedSubview(button)
         }
 
@@ -1093,22 +1094,14 @@ class KeyboardToolbarView: UIView {
     private func populateExtraKeysRow(_ row: DrawerRowView, drawerIndex: Int) {
         row.configureForScrolling()
 
-        let manager = KeyboardToolbarManager.shared
-        let edgePadding = currentEdgePadding()
-        let chromeInsets = currentChromeHorizontalInsets()
-        let availableWidth = bounds.width - edgePadding * 2 - chromeInsets.left - chromeInsets.right
-        let drawerRows = manager.effectiveDrawerRowSlots(availableWidth: availableWidth)
-        guard drawerRows.indices.contains(drawerIndex) else { return }
+        guard effectiveDrawerRows.indices.contains(drawerIndex) else { return }
 
-        for slot in drawerRows[drawerIndex] {
+        for slot in effectiveDrawerRows[drawerIndex] {
             switch slot {
             case .builtIn(let keyID):
                 if keyID.isModifier {
                     let modButton = createModifierButton(for: keyID.keyDefinition)
                     row.stackView.addArrangedSubview(modButton)
-                } else if keyID == .arrowDrawerToggle {
-                    // Skip arrow drawer toggle in extra keys drawer
-                    continue
                 } else if keyID == .drawerToggle {
                     // Skip drawer toggle in drawer
                     continue
@@ -1241,6 +1234,7 @@ class KeyboardToolbarView: UIView {
             updateSubviewSizes(in: row.stackView)
         }
         updateInsetsForCurrentTraits()
+        rebuildForCurrentWidth()
         invalidateIntrinsicContentSize()
         setNeedsLayout()
     }
@@ -1283,6 +1277,10 @@ class KeyboardToolbarView: UIView {
 extension KeyboardToolbarView: KeyboardButtonDelegate {
     func keyPressed(_ key: String, modifiers: KeyModifiers) {
         // Intercept action buttons before forwarding
+        if key == "__touchKeyboard__" {
+            onTouchKeyboardRequested?()
+            return
+        }
         if key == "__dismiss__" {
             onDismissRequested?()
             return
