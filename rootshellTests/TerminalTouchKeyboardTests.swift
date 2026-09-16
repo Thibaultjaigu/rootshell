@@ -76,6 +76,15 @@ final class TerminalTouchKeyboardTests: XCTestCase {
         XCTAssertFalse(Model.shouldDockAfterDrag(corner, in: available))
     }
 
+    func testSystemFloatingWidthAdaptsWithoutMistakingNarrowDockedWindows() {
+        XCTAssertTrue(Model.isFloatingInput(width: 320, hostWidth: 834, isPad: true))
+        XCTAssertTrue(Model.isFloatingInput(width: 320, hostWidth: 375, isPad: true))
+        XCTAssertFalse(Model.isFloatingInput(width: 834, hostWidth: 834, isPad: true))
+        XCTAssertFalse(Model.isFloatingInput(width: 320, hostWidth: 320, isPad: true))
+        XCTAssertFalse(Model.isFloatingInput(width: 320, hostWidth: 834, isPad: false))
+        XCTAssertFalse(Model.isFloatingInput(width: 0, hostWidth: 834, isPad: true))
+    }
+
     func testTabMenuAndModeAreAlwaysInControlRow() {
         XCTAssertTrue(Model.controls.contains { $0.action == .tabs })
         XCTAssertTrue(Model.controls.contains { $0.action == .mode })

@@ -67,7 +67,7 @@ struct TerminalTouchKeyboardSettingsView: View {
             }
             Section("Terminal tools") {
                 if UIDevice.current.userInterfaceIdiom == .pad {
-                    Text("Pinch inward to float the keyboard. Drag its bottom handle to move it. Pinch outward, tap the handle, or drag it to the bottom center to dock again.")
+                    Text("On iPad, pinch inward to float the keyboard. Drag the … handle to move it. Spread two fingers or double-tap the handle to dock. Docking hides the keys when a hardware keyboard is connected.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                         .themedRow()

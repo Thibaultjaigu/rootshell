@@ -181,6 +181,11 @@ nonisolated enum TerminalTouchKeyboardModel {
         frame.maxY >= available.maxY - 18 && abs(frame.midX - available.midX) < available.width * 0.2
     }
 
+    /// Detect an existing native floating input region.
+    static func isFloatingInput(width: CGFloat, hostWidth: CGFloat, isPad: Bool) -> Bool {
+        isPad && width > 0 && width <= 400 && width < hostWidth - 1
+    }
+
     struct Shortcut {
         let title: String
         let key: String

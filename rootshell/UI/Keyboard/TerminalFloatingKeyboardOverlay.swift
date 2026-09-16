@@ -1,53 +1,5 @@
 import UIKit
 
-/// UIKit retains a compatibility view controller for a responder's input view.
-/// Keep that input root in UIKit's hierarchy and move only its ordinary content
-/// view when floating, so view-controller containment remains intact.
-final class TerminalTouchKeyboardInputView: UIInputView {
-    private let keyboard: TerminalTouchKeyboardView
-    private var heightConstraint: NSLayoutConstraint!
-
-    init(keyboard: TerminalTouchKeyboardView) {
-        self.keyboard = keyboard
-        super.init(frame: keyboard.frame, inputViewStyle: .default)
-        allowsSelfSizing = true
-        translatesAutoresizingMaskIntoConstraints = false
-        heightConstraint = heightAnchor.constraint(equalToConstant: keyboard.intrinsicContentSize.height)
-        heightConstraint.priority = .init(999)
-        heightConstraint.isActive = true
-        keyboard.onAppearanceChanged = { [weak self] in self?.updateAppearance() }
-        updateAppearance()
-        attachKeyboard()
-    }
-    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-    override var intrinsicContentSize: CGSize { keyboard.intrinsicContentSize }
-
-    func updateHeight() {
-        heightConstraint.constant = keyboard.intrinsicContentSize.height
-        invalidateIntrinsicContentSize()
-        setNeedsLayout()
-    }
-
-    private func updateAppearance() {
-        backgroundColor = keyboard.containerBackgroundColor
-        overrideUserInterfaceStyle = keyboard.overrideUserInterfaceStyle
-    }
-
-    func attachKeyboard() {
-        guard keyboard.superview !== self else { return }
-        keyboard.setFloating(false)
-        keyboard.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(keyboard)
-        NSLayoutConstraint.activate([
-            keyboard.leadingAnchor.constraint(equalTo: leadingAnchor),
-            keyboard.trailingAnchor.constraint(equalTo: trailingAnchor),
-            keyboard.topAnchor.constraint(equalTo: topAnchor),
-            keyboard.bottomAnchor.constraint(equalTo: bottomAnchor)
-        ])
-        updateHeight()
-    }
-}
-
 /// Placement belongs to the terminal's window, and survives switching panes.
 @MainActor
 final class TerminalFloatingKeyboardState {
@@ -61,21 +13,6 @@ final class TerminalFloatingKeyboardState {
         windows.setObject(state, forKey: window)
         return state
     }
-}
-
-/// Replaces the system input region while the real keyboard lives in the app's
-/// window. It must not reserve a docked keyboard-sized area below the terminal.
-final class TerminalFloatingKeyboardPlaceholder: UIView {
-    init() {
-        // UIInputView initializes its render configuration by querying the
-        // responder's inputView, which re-enters this lazy initialization.
-        // A plain empty view needs no keyboard rendering configuration.
-        super.init(frame: .zero)
-        translatesAutoresizingMaskIntoConstraints = false
-        heightAnchor.constraint(equalToConstant: 0).isActive = true
-    }
-    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-    override var intrinsicContentSize: CGSize { CGSize(width: UIView.noIntrinsicMetric, height: 0) }
 }
 
 /// A scene-local overlay: only the floating card consumes touches. Everything

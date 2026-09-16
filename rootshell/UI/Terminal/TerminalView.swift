@@ -3791,6 +3791,10 @@ extension Ghostty {
             return keyboardAccessoryController.inputAccessoryView
         }
 
+        override var inputViewController: UIInputViewController? {
+            keyboardAccessoryController.inputViewController
+        }
+
         override var inputView: UIView? {
             return keyboardAccessoryController.inputView
         }

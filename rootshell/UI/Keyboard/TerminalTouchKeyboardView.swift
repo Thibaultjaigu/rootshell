@@ -1,4 +1,5 @@
 import UIKit
+import os
 import Combine
 import SwiftUI
 
@@ -218,6 +219,7 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate {
     private var rows: [[TerminalTouchKeycap]] = []
     private var controls: [TerminalTouchKeycap] = []
     private let background = UIView()
+    private let floatingGlass = UIVisualEffectView()
     private let controlGlass = UIVisualEffectView()
     private let drawer = UIScrollView()
     private let sections = UISegmentedControl(items: ["Symbols", "Navigation", "Shortcuts", "Custom"])
@@ -225,7 +227,6 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate {
     private let closeDrawerButton = UIButton(type: .system)
     private let modeButton = UIButton(type: .system)
     private let grabber = UIButton(type: .system)
-    private let grabberLine = UIView()
     private var drawerButtons: [TerminalTouchRepeatingButton] = []
     private var drawerColumns = 6
     private let suggestions = UIStackView()
@@ -267,12 +268,12 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate {
     private var compact: Bool { traitCollection.verticalSizeClass == .compact }
     private var rowHeight: CGFloat {
         if isFloating {
-            return min(44, max(28, (floatingAvailableHeight - 48 - 28 - (suggestionsEnabled ? 36 : 0) - (drawerOpen ? 90 : 0)) / 4))
+            return min(44, max(28, (floatingAvailableHeight - 48 - 44 - (suggestionsEnabled ? 36 : 0) - (drawerOpen ? 90 : 0)) / 4))
         }
         return compact ? 40 : (traitCollection.userInterfaceIdiom == .pad ? 60 : 54)
     }
     private var drawerHeight: CGFloat {
-        if isFloating { return min(124, max(0, floatingAvailableHeight - 48 - rowHeight * 4 - 28 - (suggestionsEnabled ? 36 : 0))) }
+        if isFloating { return min(124, max(0, floatingAvailableHeight - 48 - rowHeight * 4 - 44 - (suggestionsEnabled ? 36 : 0))) }
         return compact ? 124 : 156
     }
     private var deviceBottomInset: CGFloat {
@@ -283,7 +284,7 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate {
         }
         return max(safeAreaInsets.bottom, window.safeAreaInsets.bottom)
     }
-    private var bottomInset: CGFloat { isFloating ? 28 : (compactHeightEnabled ? 6 : max(6, deviceBottomInset)) }
+    private var bottomInset: CGFloat { isFloating ? 44 : (compactHeightEnabled ? 6 : max(6, deviceBottomInset)) }
     private var desiredHeight: CGFloat { 48 + rowHeight * 4 + bottomInset + (drawerOpen ? drawerHeight : 0) + (suggestionsEnabled ? 36 : 0) }
 
     init() {
@@ -292,6 +293,12 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate {
         super.init(frame: CGRect(x: 0, y: 0, width: 390, height: 304))
         translatesAutoresizingMaskIntoConstraints = false
         isMultipleTouchEnabled = true
+        floatingGlass.isUserInteractionEnabled = false
+        floatingGlass.layer.cornerRadius = 24
+        floatingGlass.layer.cornerCurve = .continuous
+        floatingGlass.clipsToBounds = true
+        floatingGlass.isHidden = true
+        addSubview(floatingGlass)
         background.isUserInteractionEnabled = false
         background.layer.cornerRadius = 24
         background.layer.cornerCurve = .continuous
@@ -353,15 +360,17 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate {
         modeButton.titleLabel?.minimumScaleFactor = 0.7
         modeButton.accessibilityLabel = String(localized: "Keyboard tools")
         addSubview(modeButton)
+        grabber.setImage(UIImage(systemName: "ellipsis"), for: .normal)
         grabber.accessibilityLabel = String(localized: "Move keyboard")
         grabber.accessibilityHint = String(localized: "Drag to move. Double-tap to dock.")
-        grabber.addAction(UIAction { [weak self] _ in self?.onPlacementRequested?(.docked) }, for: .touchUpInside)
-        grabberLine.isUserInteractionEnabled = false
-        grabberLine.backgroundColor = .tertiaryLabel
-        grabberLine.layer.cornerRadius = 2.5
-        grabber.addSubview(grabberLine)
         addSubview(grabber)
-        grabber.addGestureRecognizer(UIPanGestureRecognizer(target: self, action: #selector(dragFloatingKeyboard(_:))))
+        let drag = UIPanGestureRecognizer(target: self, action: #selector(dragFloatingKeyboard(_:)))
+        drag.maximumNumberOfTouches = 1
+        grabber.addGestureRecognizer(drag)
+        let dock = UITapGestureRecognizer(target: self, action: #selector(dockKeyboard))
+        dock.numberOfTapsRequired = 2
+        dock.require(toFail: drag)
+        grabber.addGestureRecognizer(dock)
         if traitCollection.userInterfaceIdiom == .pad {
             let pinch = UIPinchGestureRecognizer(target: self, action: #selector(pinchKeyboard(_:)))
             pinch.cancelsTouchesInView = true
@@ -402,8 +411,6 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate {
         guard isFloating != floating else { return }
         cancelInteraction()
         isFloating = floating
-        heightConstraint.isActive = !floating
-        translatesAutoresizingMaskIntoConstraints = floating
         layer.shadowColor = UIColor.black.cgColor
         layer.cornerRadius = floating ? 24 : 0
         layer.cornerCurve = .continuous
@@ -411,8 +418,15 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate {
         layer.shadowRadius = 18
         layer.shadowOffset = CGSize(width: 0, height: 6)
         refreshPlacementActions()
+        updateAppearance()
         invalidateIntrinsicContentSize()
         setNeedsLayout()
+    }
+
+    /// The UIInputView root owns height, including zero-height hardware mode.
+    /// A second height constraint on the content competes with that collapse.
+    func useContainerSizing() {
+        heightConstraint.isActive = false
     }
 
     private func refreshPlacementActions() {
@@ -439,14 +453,22 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate {
     @objc private func pinchKeyboard(_ gesture: UIPinchGestureRecognizer) {
         guard onPlacementRequested != nil else { return }
         if gesture.state == .began { cancelInteraction() }
-        guard gesture.state == .ended else { return }
+        guard gesture.state == .changed || gesture.state == .ended else { return }
         let current: Model.Placement = isFloating ? .floating : .docked
         let destination = Model.placementAfterPinch(gesture.scale, from: current)
         if destination != current { onPlacementRequested?(destination) }
     }
 
+    @objc private func dockKeyboard() { onPlacementRequested?(.docked) }
+
     @objc private func dragFloatingKeyboard(_ gesture: UIPanGestureRecognizer) {
         guard isFloating else { return }
+        #if DEBUG
+        if gesture.state != .changed {
+            let translation = gesture.translation(in: superview)
+            Ghostty.logger.debug("Touch keyboard handle pan: \(gesture.state.rawValue), translation: \(String(describing: translation))")
+        }
+        #endif
         switch gesture.state {
         case .began, .changed: onFloatingDrag?(gesture.translation(in: superview), false)
         case .ended: onFloatingDrag?(gesture.translation(in: superview), true)
@@ -481,11 +503,28 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate {
         let style: UIUserInterfaceStyle = palette.map { $0.isLight ? .light : .dark } ?? .unspecified
         if overrideUserInterfaceStyle != style { overrideUserInterfaceStyle = style }
         let toolbar = palette?.background ?? TerminalTouchKeyboardAppearance.toolbar
+        let usesFloatingGlass = isFloating && !UIAccessibility.isReduceTransparencyEnabled
+        floatingGlass.isHidden = !usesFloatingGlass
+        background.isHidden = usesFloatingGlass
         background.backgroundColor = palette?.background ?? TerminalTouchKeyboardAppearance.background
         // Paint the gaps around the glass toolbar too. A clear input root lets
         // UIKit's independently styled keyboard backdrop show through here.
-        backgroundColor = containerBackgroundColor
-        if #available(iOS 26.0, *), !UIAccessibility.isReduceTransparencyEnabled {
+        backgroundColor = usesFloatingGlass ? .clear : containerBackgroundColor
+        if usesFloatingGlass {
+            // One material for the whole detached card lets terminal content
+            // show through the gaps without blurring the key labels themselves.
+            if #available(iOS 26.0, *) {
+                let glass = UIGlassEffect(style: .regular)
+                glass.tintColor = containerBackgroundColor.withAlphaComponent(0.25)
+                floatingGlass.effect = glass
+                floatingGlass.contentView.backgroundColor = .clear
+            } else {
+                floatingGlass.effect = UIBlurEffect(style: .systemThinMaterial)
+                floatingGlass.contentView.backgroundColor = containerBackgroundColor.withAlphaComponent(0.25)
+            }
+            controlGlass.effect = nil
+            controlGlass.contentView.backgroundColor = toolbar.withAlphaComponent(0.14)
+        } else if #available(iOS 26.0, *), !UIAccessibility.isReduceTransparencyEnabled {
             let glass = UIGlassEffect(style: .clear)
             glass.tintColor = toolbar.withAlphaComponent(0.8)
             controlGlass.effect = glass
@@ -498,10 +537,11 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate {
             controlGlass.contentView.backgroundColor = toolbar.withAlphaComponent(0.75)
         }
         controlGlass.backgroundColor = .clear
+        if !usesFloatingGlass { floatingGlass.effect = nil }
+        grabber.tintColor = palette?.toolbarInk ?? .label
         preview.backgroundColor = palette?.key ?? .secondarySystemBackground
         preview.textColor = palette?.ink ?? .label
         accents.backgroundColor = palette?.key ?? .secondarySystemBackground
-        grabberLine.backgroundColor = palette?.toolbarInk.withAlphaComponent(0.45) ?? .tertiaryLabel
         (controls + rows.flatMap { $0 }).forEach { $0.palette = palette }
         refreshModeButton()
         onAppearanceChanged?()
@@ -553,6 +593,7 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate {
 
     override func layoutSubviews() {
         super.layoutSubviews()
+        floatingGlass.frame = bounds
         if previousWidth != bounds.width {
             if previousWidth != 0 { cancelInteraction() }
             previousWidth = bounds.width
@@ -564,8 +605,7 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate {
         background.layer.maskedCorners = isFloating ? [.layerMinXMinYCorner, .layerMaxXMinYCorner, .layerMinXMaxYCorner, .layerMaxXMaxYCorner] : [.layerMinXMinYCorner, .layerMaxXMinYCorner]
         if isFloating { layer.shadowPath = UIBezierPath(roundedRect: bounds, cornerRadius: 24).cgPath }
         grabber.isHidden = !isFloating
-        grabber.frame = CGRect(x: 0, y: bounds.height - 28, width: bounds.width, height: 28)
-        grabberLine.frame = CGRect(x: (bounds.width - 44) / 2, y: 11, width: 44, height: 5)
+        grabber.frame = CGRect(x: (bounds.width - 88) / 2, y: bounds.height - 44, width: 88, height: 44)
         controlGlass.frame = CGRect(x: leading + 2, y: 2, width: max(0, width - 4), height: 44)
         for (cap, rect) in zip(controls, Model.frames(keys: controls.map(\.key), width: width, y: 0, height: 48, inset: 5)) { cap.frame = rect.offsetBy(dx: leading, dy: 0) }
         if let modeCap = controls.first(where: { $0.key.action == .mode }) {
