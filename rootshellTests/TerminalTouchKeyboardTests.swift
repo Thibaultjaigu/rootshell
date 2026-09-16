@@ -1,8 +1,393 @@
 import CoreGraphics
 import XCTest
+#if canImport(UIKit)
+import UIKit
+#endif
 
 final class TerminalTouchKeyboardTests: XCTestCase {
     private typealias Model = TerminalTouchKeyboardModel
+
+    private func geometry(width: Double = 390, page: Model.Page = .letters, typingTop: Double = 0) -> Model.TypingGeometry {
+        let targets = Model.rows(page: page).enumerated().flatMap { index, row in
+            let frames = Model.frames(keys: row, width: width, y: typingTop + Double(index) * 54, height: 54,
+                inset: page == .letters && index == 1 ? width / 20 + 2 : 2)
+            return zip(row, frames).map { Model.HitTarget(key: $0.0, frame: $0.1) }
+        }
+        return .init(targets: targets, bounds: CGRect(x: 0, y: typingTop, width: width, height: 216))
+    }
+
+    func testSmallDriftAcrossLetterBoundaryKeepsOriginalSelectionAtRelease() {
+        let g = geometry()
+        let point = CGPoint(x: g.targets[0].frame.maxX - 1, y: 27)
+        var contact = Model.TouchSelection(point: point, selected: 0, modifiers: 0)
+        let end = CGPoint(x: point.x + 8, y: point.y + 8)
+        XCTAssertFalse(contact.move(to: end, in: g, dockedPad: false))
+        XCTAssertEqual(g.hit(at: end), 1)
+        XCTAssertEqual(contact.finish(at: end, in: g, dockedPad: false), 0)
+        XCTAssertNil(contact.finish(at: end, in: g, dockedPad: false))
+    }
+
+    func testSlideThresholdsUseLargestAxisAndResetAnchor() {
+        let g = geometry()
+        let point = CGPoint(x: g.targets[0].frame.maxX - 1, y: 27)
+        var contact = Model.TouchSelection(point: point, selected: 0, modifiers: 0)
+        XCTAssertFalse(contact.move(to: CGPoint(x: point.x + 17.9, y: point.y + 17.9), in: g, dockedPad: false))
+        let slide = CGPoint(x: point.x + 18, y: point.y)
+        XCTAssertTrue(contact.move(to: slide, in: g, dockedPad: false))
+        XCTAssertEqual(contact.selected, 1)
+        XCTAssertEqual(contact.anchor, slide)
+        XCTAssertFalse(contact.move(to: CGPoint(x: slide.x + 11.9, y: slide.y), in: g, dockedPad: false))
+        XCTAssertTrue(contact.move(to: CGPoint(x: slide.x + 12, y: slide.y), in: g, dockedPad: false))
+    }
+
+    func testFinalReleaseCanCompleteAnIntentionalSlide() {
+        let g = geometry()
+        var contact = Model.TouchSelection(point: CGPoint(x: 20, y: 27), selected: 0, modifiers: 8)
+        XCTAssertEqual(contact.finish(at: CGPoint(x: 60, y: 27), in: g, dockedPad: false), 1)
+        XCTAssertTrue(contact.dragged)
+        XCTAssertEqual(contact.modifiers, 8)
+    }
+
+    func testDockedTabletUsesLargerSlideThresholds() {
+        let g = geometry(width: 1024)
+        var contact = Model.TouchSelection(point: CGPoint(x: 20, y: 27), selected: 0, modifiers: 0)
+        XCTAssertFalse(contact.move(to: CGPoint(x: 61.9, y: 27), in: g, dockedPad: true))
+        XCTAssertTrue(contact.move(to: CGPoint(x: 62, y: 27), in: g, dockedPad: true))
+        XCTAssertFalse(contact.move(to: CGPoint(x: 95.9, y: 27), in: g, dockedPad: true))
+        XCTAssertTrue(contact.move(to: CGPoint(x: 96, y: 27), in: g, dockedPad: true))
+    }
+
+    func testReleaseOutsideTypingAreaOrOnActionDoesNotEmitText() {
+        let g = geometry()
+        for end in [CGPoint(x: -1, y: 27), CGPoint(x: 20, y: -1), CGPoint(x: 20, y: 217),
+                    CGPoint(x: 10, y: 135), CGPoint(x: 380, y: 135), CGPoint(x: 380, y: 189)] {
+            var contact = Model.TouchSelection(point: CGPoint(x: 20, y: 27), selected: 0, modifiers: 0)
+            XCTAssertNil(contact.finish(at: end, in: g, dockedPad: false))
+            XCTAssertTrue(contact.consumed)
+        }
+    }
+
+    func testCancelledAndEarlyCommittedContactsCannotEmitAgain() {
+        let g = geometry()
+        var first = Model.TouchSelection(point: CGPoint(x: 20, y: 27), selected: 0, modifiers: 1)
+        var second = Model.TouchSelection(point: CGPoint(x: 60, y: 27), selected: 1, modifiers: 1)
+        var output: [Int] = []
+        output.append(first.takeSelection()!)
+        output.append(second.finish(at: CGPoint(x: 60, y: 27), in: g, dockedPad: false)!)
+        XCTAssertNil(first.finish(at: CGPoint(x: 20, y: 27), in: g, dockedPad: false))
+        XCTAssertEqual(output, [0, 1])
+        var cancelled = Model.TouchSelection(point: CGPoint(x: 20, y: 27), selected: 0, modifiers: 0)
+        XCTAssertNil(cancelled.finish(at: CGPoint(x: 20, y: 27), in: g, dockedPad: false, cancelled: true))
+        XCTAssertNil(cancelled.takeSelection())
+    }
+
+    func testLeavingAndReenteringTypingAreaCanSelectAgain() {
+        let g = geometry()
+        var contact = Model.TouchSelection(point: CGPoint(x: 20, y: 27), selected: 0, modifiers: 0)
+        contact.move(to: CGPoint(x: -30, y: 27), in: g, dockedPad: false)
+        XCTAssertNil(contact.selected)
+        contact.move(to: CGPoint(x: 60, y: 27), in: g, dockedPad: false)
+        XCTAssertEqual(contact.finish(at: CGPoint(x: 60, y: 27), in: g, dockedPad: false), 1)
+    }
+
+    func testSubthresholdExitRemainsCancellableBeforeRollover() {
+        let g = geometry()
+        var contact = Model.TouchSelection(point: CGPoint(x: 20, y: 2), selected: 0, modifiers: 0)
+        XCTAssertFalse(contact.move(to: CGPoint(x: 20, y: -2), in: g, dockedPad: false))
+        XCTAssertEqual(contact.selected, 0)
+        XCTAssertNil(contact.finish(at: contact.latestPoint, in: g, dockedPad: false))
+    }
+
+    func testHitTargetsRecoverMarginsButNeverCrossActionCellsOrBounds() {
+        let g = geometry()
+        XCTAssertEqual(g.hit(at: CGPoint(x: 0, y: 27)), 0)
+        XCTAssertEqual(g.hit(at: CGPoint(x: 8, y: 81)), 10)
+        XCTAssertNil(g.hit(at: CGPoint(x: 0, y: 81)))
+        XCTAssertNil(g.hit(at: CGPoint(x: CGFloat.nan, y: 20)))
+        XCTAssertNil(g.textHit(at: CGPoint(x: 10, y: 135)))
+        for width in [320.0, 375, 393, 440, 744, 1024] {
+            for page in Model.Page.allCases {
+                let layout = geometry(width: width, page: page)
+                for (index, target) in layout.targets.enumerated() {
+                    XCTAssertEqual(layout.hit(at: CGPoint(x: target.frame.midX, y: target.frame.midY)), index)
+                }
+            }
+        }
+    }
+
+    func testPredictionOnlyChangesAmbiguousNeighboringLetterTaps() {
+        let g = geometry()
+        let prior = Model.LetterPrior(prefix: "th", completions: ["the", "there", "them", "then"])
+        let w = g.targets[1].frame, e = g.targets[2].frame
+        let boundary = CGPoint(x: w.maxX - 0.5, y: w.midY)
+        XCTAssertEqual(g.hit(at: boundary), 1)
+        XCTAssertEqual(g.predictedHit(at: boundary, prior: prior), 2)
+        XCTAssertEqual(g.predictedHit(at: boundary, prior: nil), 1)
+        XCTAssertEqual(g.predictedHit(at: boundary, prior: .init(prefix: "th", completions: [])), 1)
+        XCTAssertEqual(g.predictedHit(at: CGPoint(x: w.midX, y: w.midY), prior: prior), 1)
+        XCTAssertEqual(g.predictedHit(at: CGPoint(x: e.midX, y: e.midY), prior: prior), 2)
+        for target in g.targets where target.key.letter == nil {
+            let point = CGPoint(x: target.frame.minX + 0.5, y: target.frame.midY)
+            XCTAssertEqual(g.predictedHit(at: point, prior: prior), g.hit(at: point))
+        }
+    }
+
+    func testPredictionCannotPullFromDistantKeysOrOverrideDeliberateSlides() {
+        let g = geometry()
+        let prior = Model.LetterPrior(prefix: "th", completions: ["the", "there", "them"])
+        XCTAssertEqual(g.predictedHit(at: CGPoint(x: 3, y: 27), prior: prior), 0)
+        let point = CGPoint(x: g.targets[1].frame.maxX - 0.5, y: 27)
+        var contact = Model.TouchSelection(point: point, selected: g.predictedHit(at: point, prior: prior)!, modifiers: 0)
+        XCTAssertEqual(contact.finish(at: CGPoint(x: point.x - 18, y: 27), in: g, dockedPad: false), 1)
+    }
+
+    func testPredictionReachesVisibleKeyEdgesAcrossPhoneWidths() {
+        let prior = Model.LetterPrior(prefix: "th", completions: ["the", "there", "them", "then"])
+        for width in [320.0, 390, 430] {
+            let g = geometry(width: width)
+            let w = g.targets[1].frame
+            for miss in [2.0, 4.0] {
+                let point = CGPoint(x: w.maxX - miss, y: w.midY)
+                XCTAssertEqual(g.hit(at: point), 1)
+                XCTAssertEqual(g.predictedHit(at: point, prior: prior), 2, "width=\(width), miss=\(miss)")
+            }
+            let interior = CGPoint(x: w.maxX - 7, y: w.midY)
+            XCTAssertEqual(g.predictedHit(at: interior, prior: prior), 1)
+            for (index, target) in g.targets.enumerated() {
+                let center = CGPoint(x: target.frame.midX, y: target.frame.midY)
+                XCTAssertEqual(g.predictedHit(at: center, prior: prior), index)
+            }
+        }
+    }
+
+    func testPredictionCanResolveAnAdjacentRowWithoutPullingDistantLetters() {
+        let g = geometry()
+        let w = g.targets[1].frame
+        let point = CGPoint(x: w.midX, y: w.maxY + 4)
+        let prior = Model.LetterPrior(prefix: "ne", completions: ["new", "news"])
+        XCTAssertNotEqual(g.hit(at: point), 1)
+        XCTAssertEqual(g.predictedHit(at: point, prior: prior), 1)
+        let unrelated = Model.LetterPrior(prefix: "th", completions: ["the", "there"])
+        XCTAssertEqual(g.predictedHit(at: point, prior: unrelated), g.hit(at: point))
+    }
+
+    func testPredictionContextRejectsCodeAndUppercaseTokens() {
+        for text in ["/usr/bi", "--ver", "$PA", "my_var", "git.st", "camelCase", "PATH", "g2", "🙂ab", String(repeating: "a", count: 33)] {
+            var context = Model.PredictionContext()
+            context.append(text)
+            XCTAssertNil(context.snapshot, text)
+        }
+        for text in ["th", "Th", "please explain th"] {
+            var context = Model.PredictionContext()
+            context.append(text)
+            XCTAssertEqual(context.snapshot?.prefix, "th")
+        }
+    }
+
+    func testLoggedReleaseDriftKeepsInitialLetterWithoutDictionarySupport() {
+        let g = geometry(width: 402, typingTop: 84)
+        let traces: [(String, CGPoint, CGPoint)] = [
+            ("i", CGPoint(x: 307.6667, y: 121), CGPoint(x: 303.3333, y: 139.3333)),
+            ("o", CGPoint(x: 323.6667, y: 118.3333), CGPoint(x: 328.3333, y: 145.3333)),
+            ("i", CGPoint(x: 306, y: 121.3333), CGPoint(x: 313, y: 143.6667))
+        ]
+        for (letter, start, end) in traces {
+            let initial = g.hit(at: start)!
+            XCTAssertEqual(g.targets[initial].key.letter, letter)
+            XCTAssertEqual(g.targets[g.hit(at: end)!].key.letter, "k")
+            for prior in [nil, Model.LetterPrior(prefix: "ttp", completions: [])] {
+                var contact = Model.TouchSelection(point: start, selected: initial, modifiers: 0, prior: prior)
+                XCTAssertEqual(contact.finish(at: end, in: g, dockedPad: false), initial)
+            }
+        }
+    }
+
+    func testDeliberateSlideCanContinueFromBoundaryIntoNextKey() {
+        let g = geometry(width: 402, typingTop: 84)
+        let start = CGPoint(x: 306, y: 121.3333)
+        let initial = g.hit(at: start)!
+        let k = g.targets.firstIndex { $0.key.letter == "k" }!
+        var contact = Model.TouchSelection(point: start, selected: initial, modifiers: 0)
+        XCTAssertFalse(contact.move(to: CGPoint(x: 313, y: 143.6667), in: g, dockedPad: false))
+        let center = CGPoint(x: g.targets[k].frame.midX, y: g.targets[k].frame.midY)
+        XCTAssertEqual(contact.finish(at: center, in: g, dockedPad: false), k)
+    }
+
+    func testLoggedSpaceMissAfterIsAndExistingCorrections() {
+        let g = geometry(width: 402, typingTop: 84)
+        let samples: [(CGPoint, Model.LetterPrior, Model.Action)] = [
+            (CGPoint(x: 253.3333, y: 238.3333), .init(prefix: "is", completions: [], isCompleteWord: true), .text(" ")),
+            (CGPoint(x: 240.6667, y: 242.6667), .init(prefix: "this", completions: [], isCompleteWord: true), .text(" ")),
+            (CGPoint(x: 123, y: 108.3333), .init(prefix: "th", completions: ["the", "there"]), .text("e")),
+            (CGPoint(x: 138, y: 205), .init(prefix: "logi", completions: ["logic", "logical"]), .text("c"))
+        ]
+        for (point, prior, expected) in samples {
+            XCTAssertEqual(g.targets[g.predictedHit(at: point, prior: prior)!].key.action, expected)
+        }
+        let b = g.targets.first { $0.key.letter == "b" }!.frame
+        let word = Model.LetterPrior(prefix: "is", completions: [], isCompleteWord: true)
+        XCTAssertEqual(g.targets[g.predictedHit(at: CGPoint(x: b.midX, y: b.maxY - 12), prior: word)!].key.letter, "b")
+    }
+
+    func testPredictionStartsAfterFirstLetter() {
+        var context = Model.PredictionContext()
+        context.append("o")
+        XCTAssertEqual(context.snapshot?.prefix, "o")
+        let g = geometry(width: 402, typingTop: 84)
+        let prior = Model.LetterPrior(prefix: "o", completions: ["of", "off", "offer"])
+        let point = CGPoint(x: 136.6667, y: 171.3333)
+        XCTAssertEqual(g.targets[g.hit(at: point)!].key.letter, "d")
+        XCTAssertEqual(g.targets[g.predictedHit(at: point, prior: prior)!].key.letter, "f")
+    }
+
+    func testCompletedWordCanResolveBottomRowMissToSpace() {
+        let g = geometry()
+        let n = g.targets.firstIndex { $0.key.letter == "n" }!
+        let space = g.targets.firstIndex { $0.key.action == .text(" ") }!
+        let frame = g.targets[n].frame
+        let point = CGPoint(x: frame.midX, y: frame.maxY - 4)
+        let prior = Model.LetterPrior(prefix: "hello", completions: [], isCompleteWord: true)
+        XCTAssertEqual(g.hit(at: point), n)
+        XCTAssertEqual(g.predictedHit(at: point, prior: prior), space)
+        XCTAssertEqual(g.predictedHit(at: point, prior: .init(prefix: "hell", completions: ["hello"])), n)
+        XCTAssertEqual(g.predictedHit(at: CGPoint(x: frame.midX, y: frame.midY), prior: prior), n)
+        let spaceFrame = g.targets[space].frame
+        XCTAssertEqual(g.predictedHit(at: CGPoint(x: spaceFrame.midX, y: spaceFrame.minY + 1), prior: prior), space)
+
+        var context = Model.PredictionContext()
+        context.append("hello")
+        if case .text(let text) = g.targets[g.predictedHit(at: point, prior: prior)!].key.action {
+            context.append(text)
+        }
+        context.append("this")
+        XCTAssertEqual(context.text, "hello this")
+        XCTAssertEqual(context.snapshot?.prefix, "this")
+    }
+
+    func testPredictionSurvivesMovementFromIIntoKEdge() {
+        let g = geometry()
+        let i = g.targets.firstIndex { $0.key.letter == "i" }!
+        let k = g.targets.firstIndex { $0.key.letter == "k" }!
+        let frame = g.targets[i].frame
+        let start = CGPoint(x: frame.midX, y: frame.maxY - 18)
+        let end = CGPoint(x: frame.midX, y: frame.maxY + 4)
+        let prior = Model.LetterPrior(prefix: "typ", completions: ["typing"])
+        XCTAssertEqual(g.hit(at: end), k)
+        var contact = Model.TouchSelection(point: start, selected: i, modifiers: 0, prior: prior)
+        XCTAssertTrue(contact.move(to: end, in: g, dockedPad: false))
+        XCTAssertEqual(contact.finish(at: end, in: g, dockedPad: false), i)
+
+        var deliberate = Model.TouchSelection(point: start, selected: i, modifiers: 0, prior: prior)
+        let center = CGPoint(x: g.targets[k].frame.midX, y: g.targets[k].frame.midY)
+        XCTAssertEqual(deliberate.finish(at: center, in: g, dockedPad: false), k)
+    }
+
+    func testColdPredictionCacheResolvesBeforeNextTouchAndReusesResult() {
+        var context = Model.PredictionContext()
+        context.append("t")
+        // The preceding contact commits during the next touch-down event.
+        context.append("h")
+        let prefix = context.snapshot!.prefix
+        var cache = Model.PredictionCache()
+        XCTAssertNil(cache[prefix])
+        var loads = 0
+        let prior = cache.prior(for: prefix) {
+            loads += 1
+            return .init(prefix: prefix, completions: ["the", "there"])
+        }
+        let g = geometry()
+        let w = g.targets[1].frame
+        let point = CGPoint(x: w.maxX - 4, y: w.midY)
+        XCTAssertEqual(g.predictedHit(at: point, prior: prior), 2)
+        _ = cache.prior(for: prefix) {
+            loads += 1
+            return .init(prefix: prefix, completions: [])
+        }
+        XCTAssertEqual(loads, 1)
+    }
+
+    func testPredictionCacheBoundsAndCachesEmptyResults() {
+        var cache = Model.PredictionCache()
+        for index in 0..<129 {
+            _ = cache.prior(for: String(index)) { .init(prefix: "zz", completions: []) }
+        }
+        XCTAssertNil(cache["0"])
+        XCTAssertNotNil(cache["1"])
+        XCTAssertEqual(cache["128"]?.isEmpty, true)
+        cache.removeAll()
+        XCTAssertNil(cache["128"])
+    }
+
+    func testPredictionContextIsIndependentOfCorrectionEligibilityAndRejectsStaleSnapshots() {
+        var context = Model.PredictionContext()
+        context.apply(.text("th", eligible: false), attributed: true)
+        let old = context.snapshot
+        XCTAssertNotNil(old)
+        context.apply(.text("e", eligible: false), attributed: true)
+        XCTAssertNotEqual(old, context.snapshot)
+        context.apply(.backspace(eligible: false), attributed: true)
+        XCTAssertEqual(context.snapshot?.prefix, "th")
+        XCTAssertNotEqual(old, context.snapshot)
+        for mutation in [TerminalCorrectionContext.Mutation.invalidate, .reset, .dictationBegan, .legacyDocument("th")] {
+            context.append(" th")
+            context.apply(mutation, attributed: false)
+            XCTAssertNil(context.snapshot)
+        }
+        context.append("th")
+        context.apply(.text("e", eligible: true), attributed: false)
+        XCTAssertNil(context.snapshot)
+    }
+
+    func testCompletionWeightsFilterAndBoundCandidates() {
+        let prior = Model.LetterPrior(prefix: "th", completions: ["the", "the", "other", "th", "th!", "thus"])
+        XCTAssertEqual(prior.weight(for: "e"), 1.1, accuracy: 0.00001)
+        XCTAssertEqual(prior.weight(for: "u"), 0.6, accuracy: 0.00001)
+        XCTAssertEqual(prior.weight(for: "q"), 0.1, accuracy: 0.00001)
+    }
+
+    func testCapturedModifiersDoNotConsumeLaterModifierTap() {
+        var state = Model.Modifiers()
+        state.begin(.control)
+        state.end(.control, at: 1)
+        state.consume(0)
+        XCTAssertTrue(state.oneShot.contains(.control))
+        state.consume(1)
+        XCTAssertEqual(state.rawValue, 0)
+    }
+
+    #if canImport(UIKit)
+    @MainActor
+    func testEnglishCompletionProviderSuppliesLetterPredictions() throws {
+        guard let language = UITextChecker.availableLanguages.first(where: { $0.hasPrefix("en") }) else {
+            throw XCTSkip("An English spelling dictionary is unavailable")
+        }
+        let checker = UITextChecker()
+        let completions = checker.completions(forPartialWordRange: NSRange(location: 0, length: 2),
+                                               in: "th", language: language) ?? []
+        let prior = Model.LetterPrior(prefix: "th", completions: completions)
+        XCTAssertFalse(prior.isEmpty)
+        XCTAssertGreaterThan(prior.weight(for: "e"), prior.weight(for: "z"))
+        let g = geometry()
+        let w = g.targets[1].frame
+        XCTAssertEqual(g.predictedHit(at: CGPoint(x: w.maxX - 4, y: w.midY), prior: prior), 2)
+        let word = "hello"
+        let range = NSRange(location: 0, length: word.utf16.count)
+        let isWord = checker.rangeOfMisspelledWord(in: word, range: range, startingAt: 0,
+                                                  wrap: false, language: language).location == NSNotFound
+        XCTAssertTrue(isWord)
+        let complete = Model.LetterPrior(prefix: word, completions: checker.completions(
+            forPartialWordRange: range, in: word, language: language) ?? [], isCompleteWord: isWord)
+        let n = g.targets.first { $0.key.letter == "n" }!.frame
+        let predicted = g.predictedHit(at: CGPoint(x: n.midX, y: n.maxY - 4), prior: complete)!
+        XCTAssertEqual(g.targets[predicted].key.action, .text(" "))
+        let shortRange = NSRange(location: 0, length: 1)
+        let shortCompletions = checker.completions(forPartialWordRange: shortRange, in: "o", language: language) ?? []
+        let shortPrior = Model.LetterPrior(prefix: "o", completions: shortCompletions)
+        let logged = geometry(width: 402, typingTop: 84)
+        let shortHit = logged.predictedHit(at: CGPoint(x: 136.6667, y: 171.3333), prior: shortPrior)!
+        XCTAssertEqual(logged.targets[shortHit].key.letter, "f", "Candidates: \(shortCompletions)")
+    }
+    #endif
 
     func testThemeContrastDecodesSRGBBeforeChoosingInk() {
         let gray = Model.RGB(red: 0.5, green: 0.5, blue: 0.5)
@@ -245,11 +630,24 @@ final class TerminalTouchKeyboardTests: XCTestCase {
         var document = TerminalCorrectionContext()
         document.apply(.text("explain teh", eligible: true))
         let snapshot = context(document)!
-        let replacement = document.replacement(in: snapshot.range, with: "the", generation: snapshot.generation)!
-        XCTAssertEqual(Array(replacement.payload), [127, 127, 127] + Array("the".utf8))
+        let replacement = document.replacement(in: snapshot.range, with: "the ", generation: snapshot.generation)!
+        XCTAssertEqual(Array(replacement.payload), [127, 127, 127] + Array("the ".utf8))
         document.apply(.invalidate)
         XCTAssertNil(context(document))
         XCTAssertFalse(document.apply(.correction(replacement)))
+    }
+
+    func testSuggestionWithTrailingSpaceStartsANewWord() {
+        var document = TerminalCorrectionContext()
+        document.apply(.text("explain teh", eligible: true))
+        let snapshot = context(document)!
+        let replacement = document.replacement(in: snapshot.range, with: "the ", generation: snapshot.generation)!
+        XCTAssertTrue(document.apply(.correction(replacement)))
+        XCTAssertEqual(document.document, "explain the ")
+        XCTAssertNil(context(document))
+        document.apply(.text("next", eligible: true))
+        XCTAssertEqual(document.document, "explain the next")
+        XCTAssertEqual(context(document)?.word, "next")
     }
 
     func testSuggestionReplacementDoesNotEraseComplexGraphemes() {

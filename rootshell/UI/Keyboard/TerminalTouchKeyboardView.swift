@@ -56,6 +56,7 @@ protocol TerminalTouchKeyboardHost: AnyObject {
     var touchKeyboardThemeColors: ThemeManager.ThemeInfo.ThemeColors? { get }
     var touchKeyboardCanSend: Bool { get }
     var touchKeyboardSuggestionContext: TerminalTouchKeyboardModel.SuggestionContext? { get }
+    var touchKeyboardPredictionContext: TerminalTouchKeyboardModel.PredictionSnapshot? { get }
     func touchKeyboardInsert(_ text: String)
     func touchKeyboardSend(_ key: String, modifiers: KeyModifiers)
     func touchKeyboardAccept(_ text: String, context: TerminalTouchKeyboardModel.SuggestionContext)
@@ -64,6 +65,7 @@ protocol TerminalTouchKeyboardHost: AnyObject {
 
 extension TerminalTouchKeyboardHost {
     var touchKeyboardThemeColors: ThemeManager.ThemeInfo.ThemeColors? { nil }
+    var touchKeyboardPredictionContext: TerminalTouchKeyboardModel.PredictionSnapshot? { nil }
 }
 
 private final class TerminalTouchKeycap: UIView {
@@ -242,6 +244,13 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate {
     private var heightConstraint: NSLayoutConstraint!
     private var previousWidth: CGFloat = 0
     private var suggestionsEnabled = SettingsStore.shared.value(Settings.Keyboard.touchSuggestions)
+    private var predictionEnabled = SettingsStore.shared.value(Settings.Keyboard.touchLetterPrediction)
+    private var predictionTask: Task<Void, Never>?
+    private var pendingPrediction: Model.PredictionSnapshot?
+    private var predictionCache = Model.PredictionCache()
+    private let predictionLanguage = UITextChecker.availableLanguages.first { $0.hasPrefix("en") }
+    private var typingGeometry = Model.TypingGeometry(targets: [], bounds: .zero)
+    private var nextContactOrder: UInt64 = 0
     private var hapticsEnabled = SettingsStore.shared.value(Settings.Keyboard.touchHaptics)
     private var compactHeightEnabled = SettingsStore.shared.value(Settings.Keyboard.touchCompactHeight)
     private var glyphsEnabled = SettingsStore.shared.value(Settings.Keyboard.touchGlyphs)
@@ -259,8 +268,11 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate {
         var trackpad = false
         var accent = false
         var direction: String?
-        init(key: TerminalTouchKeycap, point: CGPoint) {
+        let order: UInt64
+        var selection: Model.TouchSelection?
+        init(key: TerminalTouchKeycap, point: CGPoint, order: UInt64, selection: Model.TouchSelection?) {
             initial = key; current = key; origin = point; anchor = point
+            self.order = order; self.selection = selection
         }
     }
     private var contacts: [ObjectIdentifier: Contact] = [:]
@@ -478,6 +490,13 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate {
     }
 
     private func refreshSettings() {
+        let prediction = SettingsStore.shared.value(Settings.Keyboard.touchLetterPrediction)
+        if predictionEnabled != prediction {
+            cancelInteraction()
+            predictionEnabled = prediction
+            predictionCache.removeAll()
+        }
+        updatePrediction()
         let enabled = SettingsStore.shared.value(Settings.Keyboard.touchSuggestions)
         if suggestionsEnabled != enabled {
             suggestionsEnabled = enabled
@@ -640,6 +659,7 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate {
             suggestions.frame = CGRect(x: leading + 8, y: y, width: width - 16, height: 36)
             y += 36
         }
+        let typingTop = y
         for (index, row) in rows.enumerated() {
             var inset: CGFloat = index == 1 && page == .letters ? width / 20 + 2 : 2
             if index == 3, compactHeightEnabled, traitCollection.userInterfaceIdiom == .phone {
@@ -649,6 +669,13 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate {
             }
             for (cap, rect) in zip(row, Model.frames(keys: row.map(\.key), width: width, y: y, height: rowHeight, inset: inset)) { cap.frame = rect.offsetBy(dx: leading, dy: 0) }
             y += rowHeight
+        }
+        let targets = rows.flatMap { $0 }.map { Model.HitTarget(key: $0.key, frame: $0.frame) }
+        let typingBounds = CGRect(x: leading, y: typingTop, width: width, height: y - typingTop)
+        if typingGeometry.bounds != typingBounds || typingGeometry.targets.map(\.frame) != targets.map(\.frame)
+            || typingGeometry.targets.map(\.key) != targets.map(\.key) {
+            if !contacts.isEmpty { cancelInteraction() }
+            typingGeometry = Model.TypingGeometry(targets: targets, bounds: typingBounds)
         }
         if abs(heightConstraint.constant - desiredHeight) > 0.5 {
             heightConstraint.constant = desiredHeight
@@ -671,7 +698,9 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate {
         return super.hitTest(point, with: event)
     }
     private func cap(at point: CGPoint) -> TerminalTouchKeycap? {
-        (controls + rows.flatMap { $0 }).first { $0.frame.contains(point) }
+        if let control = controls.first(where: { $0.frame.contains(point) }) { return control }
+        guard let index = typingGeometry.hit(at: point) else { return nil }
+        return rows.flatMap { $0 }[index]
     }
     private func feedback() {
         #if !os(visionOS)
@@ -684,9 +713,26 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate {
         sequenceTask?.cancel()
         for touch in touches.sorted(by: { $0.timestamp < $1.timestamp }) {
             let point = touch.location(in: self)
-            guard let key = cap(at: point) else { continue }
+            guard var key = cap(at: point) else { continue }
+            // Tablet touches remain cancellable until release so a pinch can take over.
+            if traitCollection.userInterfaceIdiom != .pad {
+                commitPrecedingContacts(before: nextContactOrder &+ 1)
+            }
+            var selection: Model.TouchSelection?
+            if key.key.isText {
+                let snapshot = host?.touchKeyboardPredictionContext
+                let allowsPrediction = modifierState.rawValue & ~Model.Modifier.shift.rawValue == 0
+                    && !modifierState.locked.contains(.shift)
+                let prior = predictionEnabled && allowsPrediction
+                    ? snapshot.flatMap { predictionPrior(for: $0) } : nil
+                if let index = typingGeometry.predictedHit(at: point, prior: prior) {
+                    key = rows.flatMap { $0 }[index]
+                    selection = Model.TouchSelection(point: point, selected: index, modifiers: modifierState.rawValue, prior: prior)
+                }
+            }
             let id = ObjectIdentifier(touch)
-            let contact = Contact(key: key, point: point)
+            nextContactOrder &+= 1
+            let contact = Contact(key: key, point: point, order: nextContactOrder, selection: selection)
             contacts[id] = contact
             key.pressed = true
             feedback()
@@ -695,10 +741,10 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate {
                 publishModifiers()
             } else {
                 showPreview(key)
-                contact.task = Task { @MainActor [weak self, weak contact] in
+                contact.task = Task { @MainActor [weak self, weak contact, key] in
                     try? await Task.sleep(for: .milliseconds(420))
                     guard !Task.isCancelled, let self, let contact, self.contacts[id] === contact, self.canSend,
-                          contact.current === contact.initial else { return }
+                          !contact.consumed, contact.current === contact.initial else { return }
                     switch key.key.action {
                     case .key("\u{7f}"):
                         contact.consumed = true
@@ -723,12 +769,14 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate {
                 }
             }
         }
+        refreshContactFeedback()
     }
 
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
         for touch in touches {
             guard let contact = contacts[ObjectIdentifier(touch)] else { continue }
             let point = touch.location(in: self)
+            if contact.selection != nil && contact.consumed && !contact.accent && !contact.trackpad { continue }
             if contact.accent {
                 accentIndex = min(accentChoices.count - 1, max(0, Int((point.x - accents.frame.minX) / (accents.bounds.width / CGFloat(accentChoices.count)))))
                 updateAccentSelection()
@@ -765,6 +813,10 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate {
                 continue
             }
             if case .modifier = contact.initial.key.action { continue }
+            if contact.selection != nil {
+                move(contact, to: point)
+                continue
+            }
             let next = cap(at: point)
             // Sliding adjusts the typed key, never activates a nearby action or modifier.
             let compatible: TerminalTouchKeycap? = {
@@ -780,6 +832,55 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate {
                 if let compatible { showPreview(compatible) } else { preview.isHidden = true }
             }
         }
+        refreshContactFeedback()
+    }
+
+    private func move(_ contact: Contact, to point: CGPoint) {
+        guard contact.selection?.move(to: point, in: typingGeometry,
+                                      dockedPad: traitCollection.userInterfaceIdiom == .pad && !isFloating) == true else { return }
+        contact.task?.cancel()
+        contact.current = contact.selection?.selected.map { rows.flatMap { $0 }[$0] }
+    }
+
+    private func commit(_ contact: Contact, at point: CGPoint? = nil) {
+        guard !contact.consumed else { return }
+        let index: Int?
+        if let point = point ?? contact.selection?.latestPoint {
+            index = contact.selection?.finish(at: point, in: typingGeometry,
+                dockedPad: traitCollection.userInterfaceIdiom == .pad && !isFloating)
+        } else {
+            index = contact.selection?.takeSelection()
+        }
+        contact.consumed = true
+        contact.task?.cancel()
+        guard let index else { return }
+        perform(typingGeometry.targets[index].key, modifiers: KeyModifiers(rawValue: contact.selection!.modifiers))
+    }
+
+    private func commitPrecedingContacts(before order: UInt64) {
+        for contact in contacts.values.sorted(by: { $0.order < $1.order })
+            where contact.order < order && !contact.consumed && !contact.trackpad
+                && !contact.accent && contact.selection != nil {
+            commit(contact)
+        }
+    }
+
+    private func refreshContactFeedback() {
+        let active = contacts.values.sorted { $0.order < $1.order }
+        var pressed = Set<ObjectIdentifier>()
+        for contact in active where contact.selection == nil || !contact.consumed || contact.trackpad || contact.accent {
+            if let cap = contact.current { pressed.insert(ObjectIdentifier(cap)) }
+            if contact.trackpad { contact.initial.label.text = "↔  cursor  ↕" }
+        }
+        for cap in controls + rows.flatMap({ $0 }) {
+            let value = pressed.contains(ObjectIdentifier(cap))
+            if cap.pressed != value { cap.pressed = value }
+        }
+        preview.isHidden = true
+        if !active.contains(where: { $0.accent || $0.trackpad }),
+           let contact = active.last(where: { !$0.consumed && $0.current != nil }), let cap = contact.current {
+            showPreview(cap, modifiers: contact.selection?.modifiers)
+        }
     }
 
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) { finish(touches, cancelled: false) }
@@ -791,9 +892,12 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate {
             let b = contacts[ObjectIdentifier($1)]?.initial.key.action
             if case .modifier = a { return false }
             if case .modifier = b { return true }
-            return $0.timestamp < $1.timestamp
+            return (contacts[ObjectIdentifier($0)]?.order ?? 0) < (contacts[ObjectIdentifier($1)]?.order ?? 0)
         }
         for touch in ordered {
+            if !cancelled, canSend, let contact = contacts[ObjectIdentifier(touch)] {
+                commitPrecedingContacts(before: contact.order)
+            }
             guard let contact = contacts.removeValue(forKey: ObjectIdentifier(touch)) else { continue }
             contact.task?.cancel()
             contact.current?.pressed = false
@@ -803,15 +907,18 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate {
                 publishModifiers()
             } else if !cancelled, canSend {
                 if contact.accent, accents.frame.insetBy(dx: -20, dy: -70).contains(touch.location(in: self)) {
-                    perform(Model.Key(title: accentChoices[accentIndex], action: .text(accentChoices[accentIndex])))
+                    perform(Model.Key(title: accentChoices[accentIndex], action: .text(accentChoices[accentIndex])),
+                            modifiers: contact.selection.map { KeyModifiers(rawValue: $0.modifiers) })
+                } else if !contact.consumed, contact.selection != nil {
+                    commit(contact, at: touch.location(in: self))
                 } else if !contact.consumed, let current = contact.current, current.frame.contains(touch.location(in: self)) {
                     perform(current.key)
                 }
             }
         }
-        preview.isHidden = true
-        accents.isHidden = true
+        accents.isHidden = !contacts.values.contains { $0.accent }
         updateModifierAppearance()
+        refreshContactFeedback()
     }
 
     func cancelInteraction() {
@@ -820,6 +927,7 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate {
         drawerButtons.forEach { $0.cancelRepeat() }
         sequenceTask?.cancel(); sequenceTask = nil
         suggestionTask?.cancel(); suggestionTask = nil
+        predictionTask?.cancel(); predictionTask = nil; pendingPrediction = nil
         lastSuggestionContext = nil
         suggestions.arrangedSubviews.forEach { $0.removeFromSuperview() }
         modifierState.reset()
@@ -856,16 +964,16 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate {
         }
     }
 
-    private func perform(_ key: Model.Key) {
+    private func perform(_ key: Model.Key, modifiers: KeyModifiers? = nil) {
         guard canSend else { return }
         switch key.action {
         case .text(let text):
-            let mods = KeyModifiers(rawValue: modifierState.rawValue)
+            let mods = modifiers ?? KeyModifiers(rawValue: modifierState.rawValue)
             if mods.subtracting(.shift).isEmpty {
                 // Shift changes letters without invoking terminal shortcut encoding.
                 host?.touchKeyboardInsert(mods.contains(.shift) ? text.uppercased() : text)
             } else { host?.touchKeyboardSend(text, modifiers: mods) }
-            modifierState.consume(); publishModifiers(); updateSuggestions()
+            modifierState.consume(mods.rawValue); publishModifiers(); updateSuggestions(); updatePrediction()
         case .key(let value): keyPressed(value, modifiers: [])
         case .page:
             cancelInteraction()
@@ -891,12 +999,14 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate {
         guard canSend else { return }
         host?.touchKeyboardSend(key, modifiers: modifiers.union(KeyModifiers(rawValue: modifierState.rawValue)))
         modifierState.consume(); publishModifiers(); updateSuggestions()
+        updatePrediction()
     }
     func sendRawData(_ data: Data) { guard canSend else { return }; sequenceDelegate?.sendRawData(data) }
 
-    private func showPreview(_ cap: TerminalTouchKeycap) {
+    private func showPreview(_ cap: TerminalTouchKeycap, modifiers: Int? = nil) {
         guard traitCollection.userInterfaceIdiom == .phone, case .text(let text) = cap.key.action, text != " ", !UIAccessibility.isVoiceOverRunning else { return }
-        preview.text = modifierState.isActive(.shift) ? text.uppercased() : text
+        let shifted = (modifiers ?? modifierState.rawValue) & Model.Modifier.shift.rawValue != 0
+        preview.text = shifted ? text.uppercased() : text
         preview.frame = CGRect(x: min(max(2, cap.frame.midX - 26), bounds.width - 54), y: max(0, cap.frame.minY - 49), width: 52, height: 55)
         preview.isHidden = false
         bringSubviewToFront(preview)
@@ -904,7 +1014,8 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate {
     private func showAccents(_ variants: String, contact: Contact) {
         contact.accent = true; contact.consumed = true
         preview.isHidden = true
-        accentChoices = variants.map { modifierState.isActive(.shift) ? String($0).uppercased() : String($0) }
+        let shifted = (contact.selection?.modifiers ?? modifierState.rawValue) & Model.Modifier.shift.rawValue != 0
+        accentChoices = variants.map { shifted ? String($0).uppercased() : String($0) }
         accents.arrangedSubviews.forEach { $0.removeFromSuperview() }
         for value in accentChoices {
             let label = UILabel(); label.text = value; label.textAlignment = .center; label.font = .systemFont(ofSize: 24)
@@ -1048,6 +1159,39 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate {
                 }, for: .touchUpInside)
                 self.suggestions.addArrangedSubview(button)
             }
+        }
+    }
+
+    func updatePrediction() {
+        guard predictionEnabled, canSend, predictionLanguage != nil,
+              let snapshot = host?.touchKeyboardPredictionContext else {
+            predictionTask?.cancel(); predictionTask = nil; pendingPrediction = nil
+            return
+        }
+        guard predictionCache[snapshot.prefix] == nil, pendingPrediction != snapshot else { return }
+        predictionTask?.cancel()
+        pendingPrediction = snapshot
+        // Warm between events; a rollover can commit the preceding letter and
+        // need its new prefix before this task has had a chance to run.
+        predictionTask = Task { @MainActor [weak self] in
+            await Task.yield()
+            guard !Task.isCancelled, let self, self.predictionEnabled, self.canSend,
+                  self.host?.touchKeyboardPredictionContext == snapshot else { return }
+            _ = self.predictionPrior(for: snapshot)
+            self.pendingPrediction = nil
+            self.predictionTask = nil
+        }
+    }
+
+    private func predictionPrior(for snapshot: Model.PredictionSnapshot) -> Model.LetterPrior? {
+        guard let language = predictionLanguage else { return nil }
+        let checker = checker
+        return predictionCache.prior(for: snapshot.prefix) {
+            let range = NSRange(location: 0, length: snapshot.prefix.utf16.count)
+            let completions = checker.completions(forPartialWordRange: range, in: snapshot.prefix, language: language) ?? []
+            let isWord = checker.rangeOfMisspelledWord(in: snapshot.prefix, range: range, startingAt: 0,
+                                                      wrap: false, language: language).location == NSNotFound
+            return Model.LetterPrior(prefix: snapshot.prefix, completions: completions, isCompleteWord: isWord)
         }
     }
 }

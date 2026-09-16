@@ -20,6 +20,9 @@ nonisolated extension Settings {
         static let touchSuggestions = SettingKey(
             "terminalTouchKeyboardSuggestions", default: false, group: .keyboard, policy: .localByDefault,
             configKey: "terminal-touch-keyboard-suggestions", title: String(localized: "Terminal Keyboard Suggestions"))
+        static let touchLetterPrediction = SettingKey(
+            "terminalTouchKeyboardLetterPrediction", default: true, group: .keyboard, policy: .localByDefault,
+            configKey: "terminal-touch-keyboard-letter-prediction", title: String(localized: "Letter Prediction"))
         static let touchHaptics = SettingKey(
             "terminalTouchKeyboardHaptics", default: false, group: .keyboard, policy: .localByDefault,
             configKey: "terminal-touch-keyboard-haptics", title: String(localized: "Terminal Keyboard Haptics"))
@@ -54,7 +57,7 @@ nonisolated extension Settings {
         static let all: [AnySettingDefinition] = [
             optionKeyAsAlt.erased, forceASCIIKeyboard.erased, doubleSpaceForPeriod.erased, composeAutocorrect.erased,
             writingAssistance.erased, touchEnabled.erased, touchSuggestions.erased, touchHaptics.erased,
-            touchCompactHeight.erased, touchGlyphs.erased, touchThemeAware.erased,
+            touchCompactHeight.erased, touchGlyphs.erased, touchThemeAware.erased, touchLetterPrediction.erased,
         ]
     }
 

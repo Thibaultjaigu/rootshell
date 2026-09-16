@@ -629,7 +629,8 @@ extension Ghostty {
             set { keyboardAccessoryController?.shouldShowKeyboardToolbar = newValue }
         }
         var activeKeyboardModifiers: KeyModifiers {
-            get { keyboardAccessoryController?.activeKeyboardModifiers ?? [] }
+            // Resolved touch text must not acquire modifiers pressed after its contact began.
+            get { touchKeyboardInputDepth > 0 ? [] : (keyboardAccessoryController?.activeKeyboardModifiers ?? []) }
             set { keyboardAccessoryController?.activeKeyboardModifiers = newValue }
         }
 
@@ -1278,6 +1279,8 @@ extension Ghostty {
         /// Tracks what iOS thinks the editable text contains, so UITextInput
         /// position/range queries return correct values during dictation.
         var correctionContext = TerminalCorrectionContext()
+        var touchPredictionContext = TerminalTouchKeyboardModel.PredictionContext()
+        var touchKeyboardInputDepth = 0
         // UIKit may select a committed word before inserting its completion.
         // This is a local selection, never a remote cursor movement.
         var writingAssistanceSelection: TerminalTextRange?

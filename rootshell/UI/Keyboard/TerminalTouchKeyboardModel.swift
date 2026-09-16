@@ -41,10 +41,12 @@ nonisolated enum TerminalTouchKeyboardModel {
             }
         }
 
-        mutating func consume() {
-            used.formUnion(held)
-            oneShot.removeAll()
-            lastTap.removeAll()
+        mutating func consume(_ rawValue: Int? = nil) {
+            let consumed = rawValue.map { value in Set(Modifier.allCases.filter { value & $0.rawValue != 0 }) }
+                ?? oneShot.union(held)
+            used.formUnion(held.intersection(consumed))
+            oneShot.subtract(consumed)
+            for modifier in consumed { lastTap[modifier] = nil }
         }
 
         mutating func reset() { self = Self() }
@@ -62,6 +64,206 @@ nonisolated enum TerminalTouchKeyboardModel {
         var symbol: String? = nil
         var weight: Double = 1
         var accessibility: String? = nil
+
+        var isText: Bool { if case .text = action { return true }; return false }
+        var letter: String? {
+            guard case .text(let text) = action, text.count == 1,
+                  text.first?.isASCII == true, text.first?.isLetter == true else { return nil }
+            return text.lowercased()
+        }
+    }
+
+    struct HitTarget {
+        let key: Key
+        let frame: CGRect
+    }
+
+    struct TypingGeometry {
+        let targets: [HitTarget]
+        let bounds: CGRect
+
+        private func distance(_ point: CGPoint, to rect: CGRect) -> CGFloat {
+            hypot(max(rect.minX - point.x, 0, point.x - rect.maxX),
+                  max(rect.minY - point.y, 0, point.y - rect.maxY))
+        }
+
+        func hit(at point: CGPoint) -> Int? {
+            guard point.x.isFinite, point.y.isFinite, bounds.contains(point) else { return nil }
+            if let contained = targets.firstIndex(where: { $0.frame.contains(point) }) { return contained }
+            // Recover unclaimed margins without enlarging action keys.
+            return targets.indices.filter { targets[$0].key.isText && distance(point, to: targets[$0].frame) <= 17 }
+                .min { distance(point, to: targets[$0].frame) < distance(point, to: targets[$1].frame) }
+        }
+
+        func textHit(at point: CGPoint) -> Int? {
+            guard let index = hit(at: point), targets[index].key.isText else { return nil }
+            return index
+        }
+
+        func predictedHit(at point: CGPoint, prior: LetterPrior?) -> Int? {
+            guard let geometric = hit(at: point), let prior, !prior.isEmpty,
+                  let letter = targets[geometric].key.letter else { return hit(at: point) }
+            let base = targets[geometric].frame
+            guard base.contains(point) else { return geometric }
+            let boundaryDistance = min(point.x - base.minX, base.maxX - point.x,
+                                       point.y - base.minY, base.maxY - point.y)
+            func spatial(_ rect: CGRect) -> Double {
+                // Model finger spread across half a cell; the boundary guard
+                // separately protects deliberate taps in the interior.
+                let x = (point.x - rect.midX) / max(1, rect.width * 0.5)
+                let y = (point.y - rect.midY) / max(1, rect.height * 0.5)
+                return Double(-0.5 * (x * x + y * y))
+            }
+            let baseScore = spatial(base)
+            var best = geometric, bestScore = baseScore + 0.15
+            for index in targets.indices where index != geometric {
+                let candidate = targets[index]
+                let isSpace = candidate.key.action == .text(" ")
+                let next = isSpace ? " " : candidate.key.letter
+                // Space tolerates a slightly deeper bottom-row miss after a
+                // complete word. Other letter boundaries remain narrower.
+                let allowance: CGFloat = isSpace ? min(10, base.height * 0.25) : 6
+                guard let next, boundaryDistance <= allowance, distance(point, to: candidate.frame) <= allowance,
+                      base.insetBy(dx: -0.01, dy: -0.01).intersects(candidate.frame) else { continue }
+                let ratio = min(4, max(0.25, prior.weight(for: next) / prior.weight(for: letter)))
+                guard ratio > 1 else { continue }
+                let score = spatial(candidate.frame) + log(ratio)
+                if score > bestScore { best = index; bestScore = score }
+            }
+            return best
+        }
+    }
+
+    /// A contact keeps its selection until movement indicates a deliberate slide.
+    struct TouchSelection {
+        let initialPoint: CGPoint
+        let modifiers: Int
+        let prior: LetterPrior?
+        private(set) var anchor: CGPoint
+        private(set) var latestPoint: CGPoint
+        private(set) var selected: Int?
+        private(set) var dragged = false
+        private(set) var consumed = false
+
+        init(point: CGPoint, selected: Int, modifiers: Int, prior: LetterPrior? = nil) {
+            initialPoint = point; anchor = point; latestPoint = point
+            self.selected = selected; self.modifiers = modifiers
+            self.prior = prior
+        }
+
+        @discardableResult
+        mutating func move(to point: CGPoint, in geometry: TypingGeometry, dockedPad: Bool) -> Bool {
+            guard !consumed else { return false }
+            latestPoint = point
+            let threshold: CGFloat = dockedPad ? (dragged ? 34 : 42) : (dragged ? 12 : 18)
+            let displacement = max(abs(point.x - anchor.x), abs(point.y - anchor.y))
+            // Fractional cell origins must not move an exact boundary below its threshold.
+            guard displacement + 0.0001 >= threshold else { return false }
+            let next = geometry.textHit(at: point) == nil ? nil : geometry.predictedHit(at: point, prior: prior)
+            if let next, next != selected, selected != nil {
+                let frame = geometry.targets[next].frame
+                let interior = frame.insetBy(dx: min(10, frame.width * 0.25), dy: min(10, frame.height * 0.25))
+                // Finger roll can travel far while barely entering another
+                // cell. A slide must reach its interior before changing keys.
+                guard interior.contains(point) else { return false }
+            }
+            anchor = point
+            dragged = true
+            selected = next
+            return true
+        }
+
+        mutating func takeSelection() -> Int? {
+            guard !consumed else { return nil }
+            consumed = true
+            return selected
+        }
+
+        mutating func finish(at point: CGPoint, in geometry: TypingGeometry, dockedPad: Bool,
+                             cancelled: Bool = false) -> Int? {
+            guard !cancelled, geometry.textHit(at: point) != nil else { cancel(); return nil }
+            move(to: point, in: geometry, dockedPad: dockedPad)
+            return takeSelection()
+        }
+
+        mutating func cancel() { consumed = true; selected = nil }
+    }
+
+    struct PredictionSnapshot: Equatable {
+        let prefix: String
+        let revision: UInt64
+    }
+
+    /// Read-only typing context, with no authority to replace terminal text.
+    struct PredictionContext {
+        private(set) var text = ""
+        private(set) var revision: UInt64 = 0
+
+        var snapshot: PredictionSnapshot? {
+            let token = String(text.reversed().prefix { !$0.isWhitespace }.reversed())
+            guard (1...32).contains(token.count), token.allSatisfy({ $0.isASCII && $0.isLetter }),
+                  token.dropFirst().allSatisfy({ $0.isLowercase }) else { return nil }
+            return PredictionSnapshot(prefix: token.lowercased(), revision: revision)
+        }
+
+        mutating func append(_ value: String) {
+            guard !value.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else { reset(); return }
+            text = String((text + value).suffix(128))
+            revision &+= 1
+        }
+
+        mutating func backspace() {
+            if !text.isEmpty { text.removeLast() }
+            revision &+= 1
+        }
+
+        mutating func reset() { text = ""; revision &+= 1 }
+
+        mutating func apply(_ mutation: TerminalCorrectionContext.Mutation, attributed: Bool) {
+            switch mutation {
+            case .text(let text, _) where attributed: append(text)
+            case .backspace where attributed: backspace()
+            default: reset()
+            }
+        }
+    }
+
+    struct LetterPrior {
+        private var weights: [String: Double] = [:]
+        var isEmpty: Bool { weights.isEmpty }
+
+        init(prefix: String, completions: [String], isCompleteWord: Bool = false) {
+            if isCompleteWord { weights[" "] = 1 }
+            var seen = Set<String>()
+            let matching = completions.map { $0.lowercased() }.filter {
+                $0.hasPrefix(prefix) && $0.count > prefix.count && $0.allSatisfy { $0.isASCII && $0.isLetter }
+                    && seen.insert($0).inserted
+            }.prefix(32)
+            for (rank, word) in matching.enumerated() {
+                let letter = String(word[word.index(word.startIndex, offsetBy: prefix.count)])
+                weights[letter, default: 0] += 1 / Double(rank + 1)
+            }
+        }
+
+        func weight(for letter: String) -> Double { 0.1 + (weights[letter] ?? 0) }
+    }
+
+    struct PredictionCache {
+        private var values: [String: LetterPrior] = [:]
+        private var order: [String] = []
+
+        subscript(prefix: String) -> LetterPrior? { values[prefix] }
+
+        mutating func prior(for prefix: String, load: () -> LetterPrior) -> LetterPrior {
+            if let cached = values[prefix] { return cached }
+            let prior = load()
+            values[prefix] = prior
+            order.append(prefix)
+            if order.count > 128 { values.removeValue(forKey: order.removeFirst()) }
+            return prior
+        }
+
+        mutating func removeAll() { values.removeAll(); order.removeAll() }
     }
 
     static let controls: [Key] = [

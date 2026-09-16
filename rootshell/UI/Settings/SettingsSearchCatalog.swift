@@ -155,7 +155,8 @@ extension SettingsSearchDestination {
                  keywords: ["hotkey", "drop-down", "quake", "slide", "overlay", "global shortcut"])
         case .touchKeyboard:
             Meta(section: .terminal, title: String(localized: "Terminal Keyboard"), systemImage: "keyboard.badge.ellipsis",
-                 keywords: ["custom keyboard", "qwerty", "vim", "emacs", "nano", "agent", "suggestions", "haptics"])
+                 keywords: ["custom keyboard", "qwerty", "vim", "emacs", "nano", "agent", "suggestions", "haptics",
+                            "letter prediction", "typing accuracy", "touch accuracy"])
         case .toolbarKeys:
             Meta(section: .terminal, title: String(localized: "Toolbar Keys"), systemImage: "keyboard",
                  keywords: ["toolbar", "custom keys"])

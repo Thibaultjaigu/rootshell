@@ -38,6 +38,8 @@ struct TerminalTouchKeyboardSettingsView: View {
                 Text("This preview stays on your device and sends nothing to a terminal. Hold Space to move the cursor; tap a modifier for one key, double-tap to lock, or hold it while typing.")
             }
             Section {
+                SettingToggle(Settings.Keyboard.touchLetterPrediction, title: "Letter Prediction", icon: "textformat.abc")
+                    .themedRow()
                 SettingToggle(Settings.Keyboard.touchSuggestions, title: "Suggestions", icon: "textformat.abc")
                     .themedRow()
                 SettingToggle(Settings.Keyboard.touchHaptics, title: "Haptic Feedback", icon: "hand.tap")
@@ -45,7 +47,7 @@ struct TerminalTouchKeyboardSettingsView: View {
             } header: {
                 Text("Typing")
             } footer: {
-                Text("Suggestions are local English spelling guesses and completions. Tap to apply one to recent input. Text is never automatically corrected. The double-space period shortcut follows your Terminal keyboard setting.")
+                Text("Letter Prediction uses recent English typing to help choose between nearby letters. Turn it off for literal key targeting. Suggestions are local spelling guesses and completions; tap to apply one. Words are never automatically replaced. The double-space period shortcut follows your Terminal keyboard setting.")
             }
             Section {
                 SettingToggle(Settings.Keyboard.touchCompactHeight, title: "Compact Height", icon: "arrow.down.to.line")
@@ -94,20 +96,33 @@ private struct TerminalTouchKeyboardPreview: UIViewRepresentable {
 
     final class Coordinator: TerminalTouchKeyboardHost {
         var parent: TerminalTouchKeyboardPreview
+        var predictionContext = TerminalTouchKeyboardModel.PredictionContext()
+        var lastSample = ""
         init(_ parent: TerminalTouchKeyboardPreview) { self.parent = parent }
         var touchKeyboardCanSend: Bool { true }
         var touchKeyboardSuggestionContext: TerminalTouchKeyboardModel.SuggestionContext? { nil }
-        func touchKeyboardInsert(_ text: String) { parent.sample = String((parent.sample + text).suffix(180)) }
+        var touchKeyboardPredictionContext: TerminalTouchKeyboardModel.PredictionSnapshot? { predictionContext.snapshot }
+        func touchKeyboardInsert(_ text: String) {
+            parent.sample = String((parent.sample + text).suffix(180))
+            lastSample = parent.sample
+            predictionContext.append(text)
+        }
         func touchKeyboardSend(_ key: String, modifiers: KeyModifiers) {
-            if key == "\u{7f}" { if !parent.sample.isEmpty { parent.sample.removeLast() }; return }
+            if key == "\u{7f}", modifiers.isEmpty {
+                if !parent.sample.isEmpty { parent.sample.removeLast() }
+                lastSample = parent.sample
+                predictionContext.backspace()
+                return
+            }
             if modifiers.isEmpty, key == "\r" { touchKeyboardInsert("\n"); return }
             if modifiers.isEmpty, key == "\t" { touchKeyboardInsert("    "); return }
             let label = ["\u{1b}": "Esc", "\u{1b}[A": "↑", "\u{1b}[B": "↓", "\u{1b}[C": "→", "\u{1b}[D": "←", "\r": "Return", "\t": "Tab"][key] ?? key
             touchKeyboardInsert("⟨" + (modifiers.contains(.control) ? "⌃" : "") + (modifiers.contains(.alt) ? "⌥" : "")
                                 + (modifiers.contains(.shift) ? "⇧" : "") + label + "⟩")
+            predictionContext.reset()
         }
         func touchKeyboardAccept(_ text: String, context: TerminalTouchKeyboardModel.SuggestionContext) {}
-        func touchKeyboardInvalidateSuggestions() {}
+        func touchKeyboardInvalidateSuggestions() { predictionContext.reset() }
     }
     func makeCoordinator() -> Coordinator { Coordinator(self) }
     func makeUIView(context: Context) -> TerminalTouchKeyboardView {
@@ -119,6 +134,14 @@ private struct TerminalTouchKeyboardPreview: UIViewRepresentable {
         }
         return view
     }
-    func updateUIView(_ view: TerminalTouchKeyboardView, context: Context) { context.coordinator.parent = self }
+    func updateUIView(_ view: TerminalTouchKeyboardView, context: Context) {
+        let coordinator = context.coordinator
+        coordinator.parent = self
+        if coordinator.lastSample != sample {
+            coordinator.predictionContext.reset()
+            coordinator.lastSample = sample
+        }
+        view.updatePrediction()
+    }
     static func dismantleUIView(_ view: TerminalTouchKeyboardView, coordinator: Coordinator) { view.cancelInteraction() }
 }

@@ -21,6 +21,8 @@ extension Ghostty.TerminalView: TerminalTouchKeyboardHost {
 
     func touchKeyboardInsert(_ text: String) {
         guard touchKeyboardCanSend else { return }
+        touchKeyboardInputDepth += 1
+        defer { touchKeyboardInputDepth -= 1 }
         insertText(text)
     }
 
@@ -28,7 +30,12 @@ extension Ghostty.TerminalView: TerminalTouchKeyboardHost {
         guard touchKeyboardCanSend else { return }
         // Special keys bypass insertText, but still interrupt consecutive spaces.
         resetDoubleSpaceTracking()
-        if key == "\u{7f}", modifiers.isEmpty { deleteBackward(); return }
+        if key == "\u{7f}", modifiers.isEmpty {
+            touchKeyboardInputDepth += 1
+            defer { touchKeyboardInputDepth -= 1 }
+            deleteBackward()
+            return
+        }
         invalidateWritingAssistance()
         let special: [String: UIKeyboardHIDUsage] = [
             "\r": .keyboardReturnOrEnter, "\t": .keyboardTab,
@@ -72,9 +79,17 @@ extension Ghostty.TerminalView: TerminalTouchKeyboardHost {
             generation: correctionContext.generation, documentGeneration: correctionContext.documentGeneration)
     }
 
+    var touchKeyboardPredictionContext: TerminalTouchKeyboardModel.PredictionSnapshot? {
+        guard touchKeyboardCanSend, keyboardAccessoryController?.usesTouchKeyboard == true,
+              markedTextString == nil, !koreanCompositionModel.hasActiveComposition,
+              correctionContext.dictation == nil, activeKeyboardModifiers.isEmpty,
+              virtualModTapModifier == nil, heldHardwareModifiers == .none else { return nil }
+        return touchPredictionContext.snapshot
+    }
+
     func touchKeyboardAccept(_ text: String, context: TerminalTouchKeyboardModel.SuggestionContext) {
         guard touchKeyboardCanSend, touchKeyboardSuggestionContext == context else { return }
-        _ = applyWritingAssistanceReplacement(context.range, text: text, generation: context.generation)
+        _ = applyWritingAssistanceReplacement(context.range, text: text + " ", generation: context.generation)
     }
 
     func touchKeyboardInvalidateSuggestions() { invalidateWritingAssistance() }

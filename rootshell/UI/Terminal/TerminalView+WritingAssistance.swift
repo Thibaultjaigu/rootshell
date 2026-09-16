@@ -155,6 +155,8 @@ extension Ghostty.TerminalView {
         let documentGeneration = correctionContext.documentGeneration
         let hadSelection = writingAssistanceSelection != nil
         guard correctionContext.apply(mutation) else { return false }
+        touchPredictionContext.apply(mutation, attributed: touchKeyboardInputDepth > 0)
+        keyboardAccessoryController?.touchKeyboard?.updatePrediction()
         if case .invalidate = mutation {
             // Revocation cancels the local QuickType selection only.
             writingAssistanceSelection = nil
