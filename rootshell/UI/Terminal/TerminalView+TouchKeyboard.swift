@@ -1,6 +1,11 @@
 import UIKit
 
 extension Ghostty.TerminalView: TerminalTouchKeyboardHost {
+    var touchKeyboardThemeColors: ThemeManager.ThemeInfo.ThemeColors? {
+        let (name, _) = ThemeOverrideManager.shared.resolveTheme(tabId: containingTabID, windowId: windowId)
+        return ThemeManager.shared.themeInfo(for: name)?.colors
+    }
+
     var touchKeyboardCanSend: Bool {
         isFirstResponder && window != nil && !aiAgentOverlayActive && !showComposeOverlay
     }

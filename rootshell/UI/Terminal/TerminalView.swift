@@ -3465,6 +3465,7 @@ extension Ghostty {
             super.didMoveToWindow()
 
             if window == nil {
+                keyboardAccessoryController?.dismissFloatingTouchKeyboard()
                 Ghostty.logger.warning("didMoveToWindow called but window is nil!")
                 unregisterWindowFocusObservers()
                 applyGhosttyFocus(false)
@@ -3706,6 +3707,7 @@ extension Ghostty {
                 // ROOTSHELL-TMUX (id=tmux-focus-stale-flag)
                 shouldBecomeFirstResponderWhenReady = false
                 clearInputAssistantsRecursively()
+                keyboardAccessoryController?.scheduleFloatingTouchKeyboardUpdate()
                 EffectManager.shared.notifyKeyboardToolbarLayoutChanged()
             }
 
@@ -3757,6 +3759,7 @@ extension Ghostty {
             Ghostty.logger.info("resignFirstResponder() called on terminal \(self.uuid.uuidString.prefix(8))")
             let result = super.resignFirstResponder()
             if result {
+                keyboardAccessoryController?.dismissFloatingTouchKeyboard()
                 EffectManager.shared.notifyKeyboardToolbarLayoutChanged()
                 #if targetEnvironment(macCatalyst)
                 CatalystAppDelegate.noteContinuityPasteboardTargetResigned(self)

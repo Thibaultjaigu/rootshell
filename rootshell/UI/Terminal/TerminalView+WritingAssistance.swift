@@ -46,7 +46,7 @@ extension Ghostty.TerminalView {
         if keyboardAccessoryController?.usesTouchKeyboard == true {
             guard SettingsStore.shared.value(Settings.Keyboard.touchSuggestions), touchKeyboardCanSend,
                   keyboardAccessoryController?.touchKeyboard?.window != nil,
-                  KeyboardTracker.shared.isSoftwareKeyboardVisible,
+                  (keyboardAccessoryController?.touchKeyboard?.isFloating == true || KeyboardTracker.shared.isSoftwareKeyboardVisible),
                   markedTextString == nil, !koreanCompositionModel.hasActiveComposition,
                   activeKeyboardModifiers.isEmpty, virtualModTapModifier == nil, heldHardwareModifiers == .none else { return nil }
             if let binding = tmuxPaneBinding {

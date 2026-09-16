@@ -29,6 +29,9 @@ nonisolated extension Settings {
         static let touchGlyphs = SettingKey(
             "terminalTouchKeyboardGlyphs", default: true, group: .keyboard, policy: .localByDefault,
             configKey: "terminal-touch-keyboard-glyphs", title: String(localized: "Keyboard Key Glyphs"))
+        static let touchThemeAware = SettingKey(
+            "terminalTouchKeyboardThemeAware", default: false, group: .keyboard, policy: .localByDefault,
+            configKey: "terminal-touch-keyboard-theme-aware", title: String(localized: "Follow Terminal Theme"))
 
         static let writingAssistance = SettingKey(
             "terminalWritingAssistanceMode", default: TerminalWritingAssistanceMode.off, group: .keyboard,
@@ -51,7 +54,7 @@ nonisolated extension Settings {
         static let all: [AnySettingDefinition] = [
             optionKeyAsAlt.erased, forceASCIIKeyboard.erased, doubleSpaceForPeriod.erased, composeAutocorrect.erased,
             writingAssistance.erased, touchEnabled.erased, touchSuggestions.erased, touchHaptics.erased,
-            touchCompactHeight.erased, touchGlyphs.erased,
+            touchCompactHeight.erased, touchGlyphs.erased, touchThemeAware.erased,
         ]
     }
 

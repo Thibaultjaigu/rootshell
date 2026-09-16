@@ -4,6 +4,78 @@ import XCTest
 final class TerminalTouchKeyboardTests: XCTestCase {
     private typealias Model = TerminalTouchKeyboardModel
 
+    func testThemeContrastDecodesSRGBBeforeChoosingInk() {
+        let gray = Model.RGB(red: 0.5, green: 0.5, blue: 0.5)
+        XCTAssertEqual(gray.luminance, 0.214041, accuracy: 0.000001)
+        XCTAssertEqual(Model.RGB.white.contrast(against: .black), 21, accuracy: 0.000001)
+        // Screenshot regression: the old gamma-encoded brightness calculation
+        // rejected the terminal foreground and chose black on these dark keys.
+        let key = Model.RGB(red: 44 / 255, green: 44 / 255, blue: 68 / 255)
+        let foreground = Model.RGB(red: 205 / 255, green: 214 / 255, blue: 244 / 255)
+        XCTAssertEqual(key.readableInk(preferred: foreground), foreground)
+        XCTAssertGreaterThan(foreground.contrast(against: key), 9)
+        XCTAssertLessThan(Model.RGB.black.contrast(against: key), 2)
+    }
+
+    func testThemedInkRemainsReadableForDarkLightPressedAndSelectedKeys() {
+        for background in [Model.RGB(red: 30 / 255, green: 30 / 255, blue: 46 / 255),
+                           Model.RGB(red: 44 / 255, green: 44 / 255, blue: 68 / 255),
+                           Model.RGB(red: 0.28, green: 0.3, blue: 0.38),
+                           Model.RGB(red: 0.94, green: 0.92, blue: 0.86),
+                           Model.RGB(red: 0.5, green: 0.5, blue: 0.5)] {
+            for preferred in [Model.RGB.white, .black, background] {
+                let ink = background.readableInk(preferred: preferred)
+                XCTAssertGreaterThanOrEqual(ink.contrast(against: background), 4.5)
+                // Locked modifiers reverse the fill and ink.
+                XCTAssertGreaterThanOrEqual(background.contrast(against: ink), 4.5)
+            }
+        }
+    }
+
+    func testPinchRequiresDeliberateMotionInTheCorrectDirection() {
+        XCTAssertEqual(Model.placementAfterPinch(0.7, from: .docked), .floating)
+        XCTAssertEqual(Model.placementAfterPinch(1.3, from: .floating), .docked)
+        XCTAssertEqual(Model.placementAfterPinch(0.95, from: .docked), .docked)
+        XCTAssertEqual(Model.placementAfterPinch(1.05, from: .floating), .floating)
+        XCTAssertEqual(Model.placementAfterPinch(1.4, from: .docked), .docked)
+        XCTAssertEqual(Model.placementAfterPinch(0.6, from: .floating), .floating)
+        XCTAssertEqual(Model.placementAfterPinch(.nan, from: .floating), .floating)
+    }
+
+    func testFloatingKeyboardFitsRotatedAndNarrowWindows() {
+        for size in [CGSize(width: 810, height: 1080), CGSize(width: 1080, height: 810),
+                     CGSize(width: 320, height: 500), CGSize(width: 260, height: 260)] {
+            let available = CGRect(origin: CGPoint(x: 12, y: 36), size: size)
+            for anchor in [CGPoint.zero, CGPoint(x: 1, y: 1), CGPoint(x: -2, y: 4)] {
+                let frame = Model.floatingFrame(in: available, height: 376, anchor: anchor)
+                XCTAssertTrue(available.contains(frame))
+                XCTAssertLessThanOrEqual(frame.width, 320)
+                XCTAssertGreaterThan(frame.height, 0)
+            }
+        }
+    }
+
+    func testFloatingDragAnchorClampsAndSurvivesResize() {
+        let available = CGRect(x: 12, y: 36, width: 1000, height: 700)
+        let original = Model.floatingFrame(in: available, height: 252, anchor: CGPoint(x: 0.3, y: 0.8))
+        let anchor = Model.floatingAnchor(for: original, in: available)
+        XCTAssertEqual(anchor.x, 0.3, accuracy: 0.001)
+        XCTAssertEqual(anchor.y, 0.8, accuracy: 0.001)
+        let moved = original.offsetBy(dx: 5000, dy: -5000)
+        XCTAssertEqual(Model.floatingAnchor(for: moved, in: available), CGPoint(x: 1, y: 0))
+        let resized = CGRect(x: 12, y: 36, width: 330, height: 480)
+        XCTAssertTrue(resized.contains(Model.floatingFrame(in: resized, height: 376, anchor: anchor)))
+    }
+
+    func testDraggingToBottomCenterDocksButBottomCornerDoesNot() {
+        let available = CGRect(x: 12, y: 36, width: 1000, height: 700)
+        let centered = Model.floatingFrame(in: available, height: 252, anchor: CGPoint(x: 0.5, y: 1))
+        XCTAssertTrue(Model.shouldDockAfterDrag(centered, in: available))
+        XCTAssertFalse(Model.shouldDockAfterDrag(centered.offsetBy(dx: 0, dy: -80), in: available))
+        let corner = Model.floatingFrame(in: available, height: 252, anchor: CGPoint(x: 1, y: 1))
+        XCTAssertFalse(Model.shouldDockAfterDrag(corner, in: available))
+    }
+
     func testTabMenuAndModeAreAlwaysInControlRow() {
         XCTAssertTrue(Model.controls.contains { $0.action == .tabs })
         XCTAssertTrue(Model.controls.contains { $0.action == .mode })

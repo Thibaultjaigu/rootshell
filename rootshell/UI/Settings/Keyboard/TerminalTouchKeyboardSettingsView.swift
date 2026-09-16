@@ -57,7 +57,21 @@ struct TerminalTouchKeyboardSettingsView: View {
             } footer: {
                 Text("Compact Height moves every row, including Space, down into the bottom safe area without reducing key height. The bottom corners adapt to your iPhone. Key Glyphs shows symbols for Escape, Tab, and modifiers; turn it off to show their names.")
             }
+            Section {
+                SettingToggle(Settings.Keyboard.touchThemeAware, title: "Follow Terminal Theme", icon: "paintpalette")
+                    .themedRow()
+            } header: {
+                Text("Appearance")
+            } footer: {
+                Text("Match the active terminal’s colors, including tab and window themes. Key labels keep their contrast in every mode.")
+            }
             Section("Terminal tools") {
+                if UIDevice.current.userInterfaceIdiom == .pad {
+                    Text("Pinch inward to float the keyboard. Drag its bottom handle to move it. Pinch outward, tap the handle, or drag it to the bottom center to dock again.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .themedRow()
+                }
                 NavigationLink(value: SettingsSearchDestination.toolbarKeys) {
                     Label("Custom Shortcut Keys", systemImage: "command")
                 }

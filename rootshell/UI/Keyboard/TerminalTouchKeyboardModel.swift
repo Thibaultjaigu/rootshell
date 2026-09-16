@@ -76,6 +76,33 @@ nonisolated enum TerminalTouchKeyboardModel {
         Key(title: "Hide", action: .dismiss, symbol: "keyboard.chevron.compact.down", accessibility: "Hide keyboard. Hold to pin hidden.")
     ]
 
+    /// Contrast is computed in linear light, after decoding the sRGB channels.
+    struct RGB: Equatable {
+        let red: Double
+        let green: Double
+        let blue: Double
+
+        static let black = RGB(red: 0, green: 0, blue: 0)
+        static let white = RGB(red: 1, green: 1, blue: 1)
+
+        var luminance: Double {
+            func linear(_ component: Double) -> Double {
+                let value = min(1, max(0, component))
+                return value <= 0.04045 ? value / 12.92 : pow((value + 0.055) / 1.055, 2.4)
+            }
+            return 0.2126 * linear(red) + 0.7152 * linear(green) + 0.0722 * linear(blue)
+        }
+
+        func contrast(against other: RGB) -> Double {
+            (max(luminance, other.luminance) + 0.05) / (min(luminance, other.luminance) + 0.05)
+        }
+
+        func readableInk(preferred: RGB) -> RGB {
+            if preferred.contrast(against: self) >= 4.5 { return preferred }
+            return Self.white.contrast(against: self) > Self.black.contrast(against: self) ? .white : .black
+        }
+    }
+
     /// Paired neutral colors remain legible through keyboard-window trait changes.
     /// Both cap and ink must resolve from the same appearance, including Shift.
     static func keyColors(dark: Bool, character: Bool, pressed: Bool, selected: Bool) -> (background: Double, ink: Double) {
@@ -122,6 +149,36 @@ nonisolated enum TerminalTouchKeyboardModel {
             defer { x += unit * key.weight }
             return CGRect(x: x, y: y, width: unit * key.weight, height: height)
         }
+    }
+
+    enum Placement: Equatable { case docked, floating }
+
+    static func placementAfterPinch(_ scale: CGFloat, from placement: Placement) -> Placement {
+        guard scale.isFinite else { return placement }
+        switch placement {
+        case .docked: return scale < 0.78 ? .floating : .docked
+        case .floating: return scale > 1.22 ? .docked : .floating
+        }
+    }
+
+    /// The anchor describes the available travel, not the screen coordinates,
+    /// so a floating keyboard remains reachable after rotation/window resizing.
+    static func floatingFrame(in available: CGRect, height: CGFloat, anchor: CGPoint) -> CGRect {
+        let size = CGSize(width: min(320, max(0, available.width)), height: min(max(0, height), max(0, available.height)))
+        let x = min(1, max(0, anchor.x.isFinite ? anchor.x : 1))
+        let y = min(1, max(0, anchor.y.isFinite ? anchor.y : 1))
+        return CGRect(x: available.minX + (available.width - size.width) * x,
+                      y: available.minY + (available.height - size.height) * y, width: size.width, height: size.height)
+    }
+
+    static func floatingAnchor(for frame: CGRect, in available: CGRect) -> CGPoint {
+        let travelX = available.width - frame.width, travelY = available.height - frame.height
+        return CGPoint(x: travelX > 0 ? min(1, max(0, (frame.minX - available.minX) / travelX)) : 0.5,
+                       y: travelY > 0 ? min(1, max(0, (frame.minY - available.minY) / travelY)) : 0.5)
+    }
+
+    static func shouldDockAfterDrag(_ frame: CGRect, in available: CGRect) -> Bool {
+        frame.maxY >= available.maxY - 18 && abs(frame.midX - available.midX) < available.width * 0.2
     }
 
     struct Shortcut {
