@@ -12,6 +12,8 @@ final class TerminalTouchKeyboardInputView: UIInputView {
     private var suppressed = false
     private var heightConstraint: NSLayoutConstraint!
     private let floatingPanel = TerminalTouchKeyboardFloatingPanel()
+    private var ownsFloatingDragCallbacks = false
+    private var floatingPositionUpdateScheduled = false
 
     init(keyboard: TerminalTouchKeyboardView) {
         self.keyboard = keyboard
@@ -43,6 +45,11 @@ final class TerminalTouchKeyboardInputView: UIInputView {
     func updateHeight() {
         let height = intrinsicContentSize.height
         guard abs(heightConstraint.constant - height) > 0.5 else { return }
+        // Capture the visible position before UIKit resizes/recenters its host,
+        // including when the user has not dragged the keyboard yet.
+        if keyboard.usesSystemPlacement, isNativeFloating, !suppressed {
+            floatingPanel.preservePosition()
+        }
         heightConstraint.constant = height
         invalidateIntrinsicContentSize()
         setNeedsLayout()
@@ -93,10 +100,31 @@ final class TerminalTouchKeyboardInputView: UIInputView {
         updateHeight()
         super.layoutSubviews()
         updateFloatingPanel()
+        // Our layout can run before UIKit finishes positioning the containing
+        // host. Apply the anchor again after that enclosing layout has returned.
+        if keyboard.usesSystemPlacement, isNativeFloating, !floatingPositionUpdateScheduled {
+            floatingPositionUpdateScheduled = true
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.floatingPositionUpdateScheduled = false
+                guard self.window != nil else { return }
+                self.updateFloatingPanel()
+            }
+        }
     }
 
     override func willMove(toWindow newWindow: UIWindow?) {
-        if newWindow !== window { releaseFloatingPanel() }
+        if newWindow !== window {
+            if keyboard.usesSystemPlacement, isNativeFloating, !suppressed {
+                // UIKit may detach/reparent the input root while resizing. The
+                // old host must be restored, but the screen anchor must survive.
+                floatingPanel.preservePosition()
+                floatingPanel.detach(preservingPosition: true)
+                floatingPanel.cancelDrag()
+            } else {
+                releaseFloatingPanel()
+            }
+        }
         super.willMove(toWindow: newWindow)
     }
 
@@ -107,16 +135,27 @@ final class TerminalTouchKeyboardInputView: UIInputView {
             return
         }
         floatingPanel.update(input: self, content: keyboard)
+        ownsFloatingDragCallbacks = true
         keyboard.onFloatingDrag = { [weak self] translation, ended in
-            self?.floatingPanel.move(translation, ended: ended)
+            self?.moveFloatingPanel(translation, ended: ended)
         }
         keyboard.onFloatingDragCancelled = { [weak self] in self?.floatingPanel.cancelDrag() }
-        keyboard.onFloatingNudge = { [weak self] delta in self?.floatingPanel.move(delta, ended: true) }
+        keyboard.onFloatingNudge = { [weak self] delta in self?.moveFloatingPanel(delta, ended: true) }
+    }
+
+    private func moveFloatingPanel(_ translation: CGPoint, ended: Bool) {
+        guard keyboard.usesSystemPlacement, isNativeFloating, !suppressed,
+              keyboard.superview === self else { return }
+        // A host may be replaced between input-root layout passes. Reacquire
+        // it here too, so the handle never depends on toggling input views.
+        floatingPanel.update(input: self, content: keyboard)
+        floatingPanel.move(translation, ended: ended)
     }
 
     private func releaseFloatingPanel() {
-        guard floatingPanel.isAttached else { return }
         floatingPanel.detach()
+        guard ownsFloatingDragCallbacks else { return }
+        ownsFloatingDragCallbacks = false
         keyboard.onFloatingDrag = nil
         keyboard.onFloatingDragCancelled = nil
         keyboard.onFloatingNudge = nil
@@ -163,18 +202,29 @@ private final class TerminalTouchKeyboardFloatingPanel {
     private var baseCenter = CGPoint.zero
     private var lastAppliedCenter: CGPoint?
     private var desiredOrigin: CGPoint?
+    private weak var positionScreen: UIScreen?
     private var originalMask: CALayer?
     private var dragOrigin: CGPoint?
-    var isAttached: Bool { panel != nil }
+
+    func preservePosition() {
+        guard desiredOrigin == nil, let panel, let content, let window = panel.window,
+              content.isDescendant(of: panel) else { return }
+        positionScreen = window.screen
+        desiredOrigin = window.screen.coordinateSpace.convert(
+            content.convert(content.bounds, to: window), from: window).origin
+    }
 
     func update(input: UIView, content: UIView) {
-        guard let window = input.window else { detach(); return }
+        guard let window = input.window else { detach(preservingPosition: true); return }
+        if let positionScreen, positionScreen !== window.screen { detach() }
         // Stop before the full-screen tracking view. Only the narrow hosting
         // item containing this input belongs to this floating keyboard.
         var candidate = input
-        if dragOrigin != nil, let panel, panel.window === window, input.isDescendant(of: panel) {
+        if let panel, panel.window === window, input.isDescendant(of: panel) {
             // A self-sizing pass can temporarily leave an ancestor at its old
-            // height. Do not swap drag hosts and restart the gesture mid-pan.
+            // height, including after a drawer toggle with no drag in progress.
+            // Once found, the host's identity/ancestry is authoritative; probing
+            // heights again can select an inner view and strand the drag handle.
             candidate = panel
         } else {
             while let parent = candidate.superview, parent !== window,
@@ -184,9 +234,9 @@ private final class TerminalTouchKeyboardFloatingPanel {
                 candidate = parent
             }
         }
-        guard candidate !== input else { detach(); return }
+        guard candidate !== input else { detach(preservingPosition: true); return }
         if panel !== candidate {
-            detach()
+            detach(preservingPosition: true)
             panel = candidate
             baseCenter = candidate.center
             originalMask = candidate.layer.mask
@@ -200,19 +250,25 @@ private final class TerminalTouchKeyboardFloatingPanel {
                                     cornerRadius: content.layer.cornerRadius).cgPath
         cardMask.fillColor = UIColor.black.cgColor
         CATransaction.commit()
-        // Leave UIKit's presentation/pinch positioning alone until the user
-        // drags. Afterwards retain that position through drawer/rotation layout.
+        // Leave initial UIKit presentation alone, then retain the position
+        // captured by a drag or a content-height change.
         if let desiredOrigin { position(at: desiredOrigin) }
     }
 
-    /// Translation arrives in the stationary keyboard window, not the moving
-    /// (and potentially scaled) input view. Keep the gesture's initial origin
-    /// for the entire drag, including when a screen edge clamps the card.
+    /// Store anchors in screen coordinates: UIKit may resize, move, or replace
+    /// its window during an input-height change. Convert the window-space drag
+    /// vector without incorporating the window's screen offset.
     func move(_ translation: CGPoint, ended: Bool) {
         guard let content, let window = panel?.window else { return }
-        if dragOrigin == nil { dragOrigin = content.convert(content.bounds, to: window).origin }
+        let space = window.screen.coordinateSpace
+        positionScreen = window.screen
+        if dragOrigin == nil {
+            dragOrigin = space.convert(content.convert(content.bounds, to: window), from: window).origin
+        }
         guard let origin = dragOrigin else { return }
-        let destination = CGPoint(x: origin.x + translation.x, y: origin.y + translation.y)
+        let start = space.convert(CGPoint.zero, from: window)
+        let end = space.convert(translation, from: window)
+        let destination = CGPoint(x: origin.x + end.x - start.x, y: origin.y + end.y - start.y)
         desiredOrigin = destination
         position(at: destination)
         if ended { dragOrigin = nil }
@@ -224,12 +280,16 @@ private final class TerminalTouchKeyboardFloatingPanel {
         // Preserve UIKit's current scale/rotation. Capturing its transform at
         // attachment can freeze a transient pinch/presentation scale forever.
         if panel.center != lastAppliedCenter { baseCenter = panel.center }
-        let frame = content.convert(content.bounds, to: window)
-        let available = window.bounds.inset(by: window.safeAreaInsets).insetBy(dx: 12, dy: 12)
+        let space = window.screen.coordinateSpace
+        let frame = space.convert(content.convert(content.bounds, to: window), from: window)
+        let available = space.bounds.inset(by: window.safeAreaInsets).insetBy(dx: 12, dy: 12)
         let proposed = CGRect(origin: origin, size: frame.size)
         let moved = TerminalTouchKeyboardModel.clampedFloatingDragFrame(proposed, in: available)
-        let before = parent.convert(frame.origin, from: window)
-        let after = parent.convert(moved.origin, from: window)
+        // Clamping an intermediate resize frame must not replace the anchor:
+        // UIKit can report a temporarily larger host before layout settles.
+        let before = parent.convert(space.convert(frame.origin, to: window), from: window)
+        let after = parent.convert(space.convert(moved.origin, to: window), from: window)
+        guard abs(after.x - before.x) > 0.5 || abs(after.y - before.y) > 0.5 else { return }
         // Center is in the parent's coordinates, so UIKit's own transform is
         // applied exactly once. No implicit animation may trail the finger.
         UIView.performWithoutAnimation {
@@ -241,7 +301,7 @@ private final class TerminalTouchKeyboardFloatingPanel {
 
     func cancelDrag() { dragOrigin = nil }
 
-    func detach() {
+    func detach(preservingPosition: Bool = false) {
         if let panel {
             if panel.center == lastAppliedCenter { panel.center = baseCenter }
             if panel.layer.mask === cardMask { panel.layer.mask = originalMask }
@@ -250,7 +310,10 @@ private final class TerminalTouchKeyboardFloatingPanel {
         content = nil
         originalMask = nil
         lastAppliedCenter = nil
-        desiredOrigin = nil
-        dragOrigin = nil
+        if !preservingPosition {
+            desiredOrigin = nil
+            positionScreen = nil
+            dragOrigin = nil
+        }
     }
 }

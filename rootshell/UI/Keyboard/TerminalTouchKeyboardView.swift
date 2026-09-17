@@ -1,5 +1,4 @@
 import UIKit
-import os
 import Combine
 import SwiftUI
 
@@ -583,11 +582,6 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate, UIGesture
         // pan. Measure in its stationary window so one finger-point is one
         // window-point; the app overlay already supplies a stationary parent.
         let translation = gesture.translation(in: usesSystemPlacement ? window : superview)
-        #if DEBUG
-        if gesture.state != .changed {
-            Ghostty.logger.debug("Touch keyboard handle pan: \(gesture.state.rawValue), translation: \(String(describing: translation))")
-        }
-        #endif
         switch gesture.state {
         case .began, .changed: onFloatingDrag?(translation, false)
         case .ended: onFloatingDrag?(translation, true)
@@ -1431,7 +1425,10 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate, UIGesture
 
     private func toggleToolbarDrawer() {
         cancelInteraction(preservingModifiers: true, preservingSuggestions: true)
-        let layoutRoot: UIView = window ?? superview ?? self
+        // Keep system-detached resizing local to the card's container; the native
+        // keyboard window also owns unrelated presentation/positioning views.
+        let systemDetached = isFloating && usesSystemPlacement
+        let layoutRoot: UIView = systemDetached ? (superview ?? self) : (window ?? superview ?? self)
         layoutRoot.layoutIfNeeded()
         layoutIfNeeded()
         let oldRows = toolbarDrawerRows
