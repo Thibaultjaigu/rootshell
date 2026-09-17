@@ -46,7 +46,7 @@ final class TerminalFloatingKeyboardOverlay: UIView {
         let frame = TerminalTouchKeyboardModel.floatingFrame(in: available,
             height: keyboard.intrinsicContentSize.height, anchor: state.anchor)
         if keyboard.frame.size != frame.size {
-            keyboard.cancelInteraction()
+            if keyboard.frame.width != frame.width { keyboard.cancelInteraction() }
             dragOrigin = nil
         }
         keyboard.frame = frame

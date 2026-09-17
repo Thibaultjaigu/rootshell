@@ -200,11 +200,10 @@ final class TerminalKeyboardAccessoryController: NSObject {
             guard let self else { return }
             self.touchKeyboardInputView?.updateHeight()
             self.floatingKeyboardOverlay?.setNeedsLayout()
-            // UIKit observes the native controller's height constraints. Reloading
-            // during its floating transition would rebuild the moving input set.
-            if self.host?.keyboardHostView.traitCollection.userInterfaceIdiom != .pad {
-                self.refreshKeyboardLayoutAfterAccessoryChange()
-            }
+            // The self-sizing input root handles height changes on iPhone too.
+            // Reloading input views here tears down the keyboard during each
+            // drawer transition, flashing the entire typing surface.
+            EffectManager.shared.notifyKeyboardToolbarLayoutChanged()
         }
         keyboard.onPlacementRequested = { [weak self] in self?.setTouchKeyboardPlacement($0) }
         touchKeyboard = keyboard
@@ -242,6 +241,27 @@ final class TerminalKeyboardAccessoryController: NSObject {
         cancellables.insert(AnyCancellable { NotificationCenter.default.removeObserver(inactive) })
         cancellables.insert(AnyCancellable { NotificationCenter.default.removeObserver(active) })
 
+        #endif
+    }
+
+    /// The custom keyboard owns its height; UIKit's last frame notification
+    /// can still describe an earlier drawer position. Read the requested size
+    /// directly during terminal layout, without querying UIKit's input window
+    /// (which can still have its old frame or exclude the bottom safe area).
+    var dockedTouchKeyboardFrameInScreen: CGRect? {
+        #if os(visionOS) || targetEnvironment(macCatalyst)
+        return nil
+        #else
+        guard usesTouchKeyboard, touchKeyboardPlacement == .docked,
+              let host, host.keyboardIsFirstResponder,
+              let window = host.keyboardHostView.window,
+              let keyboard = touchKeyboard, !keyboard.isFloating,
+              let input = touchKeyboardInputView else { return nil }
+        let height = input.intrinsicContentSize.height
+        guard height > 0 else { return nil }
+        let frame = window.convert(window.bounds, to: nil)
+        return CGRect(x: frame.minX, y: frame.maxY - height,
+                      width: frame.width, height: height)
         #endif
     }
 

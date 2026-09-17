@@ -253,6 +253,7 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate, UIGesture
     private var toolbarDrawerState = Model.ToolbarDrawerState.closed
     private var toolbarDrawerOpenByDefault = KeyboardToolbarManager.shared.drawerOpenByDefault
     private var toolbarDrawerRows: [UIScrollView] = []
+    private var toolbarDrawerIndices: [Int] = []
     private var toolbarDrawerButtons: [[TerminalTouchRepeatingButton]] = []
     private var toolbarDrawerModifiers: [TerminalTouchRepeatingButton: Model.Modifier] = [:]
     private var toolbarDrawerHeight: CGFloat { CGFloat(toolbarDrawerRows.count) * 44 }
@@ -731,15 +732,8 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate, UIGesture
             writingAssistanceButton.isHidden = false
         } else { writingAssistanceButton.isHidden = true }
         for (index, row) in toolbarDrawerRows.enumerated() {
-            row.frame = CGRect(x: leading + 5, y: CGFloat(index) * 44, width: max(0, width - 10), height: 44)
-            var x: CGFloat = 0
-            for button in toolbarDrawerButtons[index] {
-                let titleWidth = ((button.configuration?.title ?? "") as NSString).size(withAttributes: [.font: UIFont.systemFont(ofSize: 13)]).width
-                let buttonWidth = max(40, min(120, titleWidth + 20))
-                button.frame = CGRect(x: x, y: 2, width: buttonWidth, height: 40)
-                x += buttonWidth + 2
-            }
-            row.contentSize = CGSize(width: x, height: 44)
+            layoutToolbarDrawer(row, buttons: toolbarDrawerButtons[index], position: index,
+                                leading: leading, width: width)
         }
         var y = toolbarHeight
         let contentHeight = rowHeight * 4 + (suggestionsEnabled ? 36 : 0)
@@ -1039,16 +1033,18 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate, UIGesture
         refreshContactFeedback()
     }
 
-    func cancelInteraction(preservingModifiers: Bool = false) {
+    func cancelInteraction(preservingModifiers: Bool = false, preservingSuggestions: Bool = false) {
         hidePageIndicator()
         contacts.values.forEach { $0.task?.cancel(); $0.initial.pressed = false; $0.current?.pressed = false }
         contacts.removeAll()
         (drawerButtons + toolbarDrawerButtons.flatMap { $0 }).forEach { $0.cancelRepeat() }
         sequenceTask?.cancel(); sequenceTask = nil
-        suggestionTask?.cancel(); suggestionTask = nil
+        if !preservingSuggestions {
+            suggestionTask?.cancel(); suggestionTask = nil
+            lastSuggestionContext = nil
+            suggestions.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        }
         predictionTask?.cancel(); predictionTask = nil; pendingPrediction = nil
-        lastSuggestionContext = nil
-        suggestions.arrangedSubviews.forEach { $0.removeFromSuperview() }
         if preservingModifiers { modifierState.cancelHeld() } else { modifierState.reset() }
         publishModifiers()
         preview.isHidden = true
@@ -1108,12 +1104,7 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate, UIGesture
             rebuildKeys()
         case .switchKeyboard: cancelInteraction(); onSwitchKeyboard?()
         case .drawer:
-            cancelInteraction(preservingModifiers: true)
-            toolbarDrawerState = toolbarDrawerState.toggled(rowCount: toolbarDrawerKeys.count,
-                cycle: KeyboardToolbarManager.shared.drawerToggleMode == .cycle)
-            rebuildToolbarDrawers()
-            updateModifierAppearance()
-            setNeedsLayout()
+            toggleToolbarDrawer()
         case .dismiss: cancelInteraction(); onDismiss?()
         case .compose: cancelInteraction(); onCompose?()
         case .paste: cancelInteraction(); onPaste?()
@@ -1327,14 +1318,98 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate, UIGesture
         setNeedsLayout()
     }
 
-    private func rebuildToolbarDrawers() {
+    private func layoutToolbarDrawer(_ row: UIScrollView, buttons: [TerminalTouchRepeatingButton],
+                                     position: Int, leading: CGFloat, width: CGFloat) {
+        row.frame = CGRect(x: leading + 5, y: CGFloat(position) * 44, width: max(0, width - 10), height: 44)
+        var x: CGFloat = 0
+        for button in buttons {
+            let titleWidth = ((button.configuration?.title ?? "") as NSString).size(withAttributes: [.font: UIFont.systemFont(ofSize: 13)]).width
+            let buttonWidth = max(40, min(120, titleWidth + 20))
+            button.frame = CGRect(x: x, y: 2, width: buttonWidth, height: 40)
+            x += buttonWidth + 2
+        }
+        row.contentSize = CGSize(width: x, height: 44)
+    }
+
+    private func toggleToolbarDrawer() {
+        cancelInteraction(preservingModifiers: true, preservingSuggestions: true)
+        let layoutRoot: UIView = window ?? superview ?? self
+        layoutRoot.layoutIfNeeded()
+        layoutIfNeeded()
+        let oldRows = toolbarDrawerRows
+        let oldHeight = toolbarDrawerHeight
+        toolbarDrawerState = toolbarDrawerState.toggled(rowCount: toolbarDrawerKeys.count,
+            cycle: KeyboardToolbarManager.shared.drawerToggleMode == .cycle)
+        let outgoing = rebuildToolbarDrawers(preservingRows: true)
+        let incoming = toolbarDrawerRows.filter { !oldRows.contains($0) }
+        let animated = window != nil && !UIAccessibility.isReduceMotionEnabled
+
+        // Lay out new keys before fading them in. Existing rows retain their
+        // frames and horizontal scroll offsets until the animation starts.
+        let leading = isFloating ? 0 : max(safeAreaInsets.left, window?.safeAreaInsets.left ?? 0)
+        let trailing = isFloating ? 0 : max(safeAreaInsets.right, window?.safeAreaInsets.right ?? 0)
+        for (index, row) in toolbarDrawerRows.enumerated() where incoming.contains(row) {
+            layoutToolbarDrawer(row, buttons: toolbarDrawerButtons[index], position: index,
+                                leading: leading, width: max(0, bounds.width - leading - trailing))
+            row.alpha = animated ? 0 : 1
+        }
+        for row in outgoing {
+            row.isUserInteractionEnabled = false
+            row.accessibilityElementsHidden = true
+        }
+        updateModifierAppearance()
+        let heightDelta = toolbarDrawerHeight - oldHeight
+        let changes = {
+            // Publish synchronously so UIKit's self-sizing input root and the
+            // content move in the same animation, without reloadInputViews().
+            self.heightConstraint.constant = self.desiredHeight
+            self.invalidateIntrinsicContentSize()
+            if heightDelta != 0 { self.onHeightChanged?() }
+            self.setNeedsLayout()
+            layoutRoot.layoutIfNeeded()
+            self.layoutIfNeeded()
+            incoming.forEach { $0.alpha = 1 }
+            outgoing.forEach {
+                $0.alpha = 0
+                $0.transform = CGAffineTransform(translationX: 0, y: heightDelta)
+            }
+        }
+        if animated {
+            UIView.animate(withDuration: 0.18, delay: 0,
+                           options: [.curveEaseInOut, .beginFromCurrentState, .allowUserInteraction],
+                           animations: changes) { _ in
+                outgoing.forEach { $0.removeFromSuperview() }
+            }
+        } else {
+            UIView.performWithoutAnimation(changes)
+            outgoing.forEach { $0.removeFromSuperview() }
+        }
+    }
+
+    /// Reuse rows during a toggle; configuration and appearance changes rebuild
+    /// them. The caller keeps outgoing rows alive only for their exit animation.
+    @discardableResult
+    private func rebuildToolbarDrawers(preservingRows: Bool = false) -> [UIScrollView] {
         toolbarDrawerButtons.flatMap { $0 }.forEach { $0.cancelRepeat() }
-        toolbarDrawerRows.forEach { $0.removeFromSuperview() }
+        let previousRows = Dictionary(uniqueKeysWithValues: zip(toolbarDrawerIndices, zip(toolbarDrawerRows, toolbarDrawerButtons)))
+        toolbarDrawerState = toolbarDrawerState.clamped(rowCount: toolbarDrawerKeys.count)
+        let indices = toolbarDrawerState.visibleRows(rowCount: toolbarDrawerKeys.count)
+        let outgoing = toolbarDrawerIndices.compactMap { index -> UIScrollView? in
+            preservingRows && indices.contains(index) ? nil : previousRows[index]?.0
+        }
+        if !preservingRows { outgoing.forEach { $0.removeFromSuperview() } }
         toolbarDrawerRows.removeAll()
         toolbarDrawerButtons.removeAll()
-        toolbarDrawerModifiers.removeAll()
-        toolbarDrawerState = toolbarDrawerState.clamped(rowCount: toolbarDrawerKeys.count)
-        for index in toolbarDrawerState.visibleRows(rowCount: toolbarDrawerKeys.count) {
+        toolbarDrawerIndices = indices
+        toolbarDrawerModifiers = toolbarDrawerModifiers.filter { button, _ in
+            preservingRows && indices.contains { index in previousRows[index]?.1.contains(button) == true }
+        }
+        for index in indices {
+            if preservingRows, let (row, buttons) = previousRows[index] {
+                toolbarDrawerRows.append(row)
+                toolbarDrawerButtons.append(buttons)
+                continue
+            }
             let row = UIScrollView()
             row.showsHorizontalScrollIndicator = false
             row.alwaysBounceHorizontal = false
@@ -1377,6 +1452,7 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate, UIGesture
             toolbarDrawerButtons.append(buttons)
         }
         setNeedsLayout()
+        return outgoing
     }
 
     private func sendCustomSequence(_ steps: [SequenceStep]) {

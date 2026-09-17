@@ -644,6 +644,9 @@ extension Ghostty {
             guard reservesKeyboardToolbarAtBottom else { return nil }
             return keyboardAccessoryController?.keyboardAccessoryFrameInScreen
         }
+        override var dockedTouchKeyboardFrameInScreen: CGRect? {
+            keyboardAccessoryController?.dockedTouchKeyboardFrameInScreen
+        }
         override var reservedKeyboardToolbarHeightAtBottom: CGFloat {
             // Hold the pre-resign reserve while an overlay owns the keyboard so
             // bottom padding doesn't collapse and re-grow across the round trip.
