@@ -566,7 +566,8 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate, UIGesture
         let style: UIUserInterfaceStyle = palette.map { $0.isLight ? .light : .dark } ?? .unspecified
         if overrideUserInterfaceStyle != style { overrideUserInterfaceStyle = style }
         let toolbar = palette?.background ?? TerminalTouchKeyboardAppearance.toolbar
-        let usesFloatingGlass = isFloating && !UIAccessibility.isReduceTransparencyEnabled
+        let floatingStyle = SettingsStore.shared.value(Settings.Keyboard.touchFloatingGlassStyle)
+        let usesFloatingGlass = isFloating && floatingStyle != .solid && !UIAccessibility.isReduceTransparencyEnabled
         floatingGlass.isHidden = !usesFloatingGlass
         background.isHidden = usesFloatingGlass
         background.backgroundColor = palette?.background ?? TerminalTouchKeyboardAppearance.background
@@ -574,19 +575,24 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate, UIGesture
         // UIKit's independently styled keyboard backdrop show through here.
         backgroundColor = usesFloatingGlass ? .clear : containerBackgroundColor
         if usesFloatingGlass {
+            let tintOpacity = Model.floatingGlassTintOpacity(SettingsStore.shared.value(Settings.Keyboard.touchFloatingGlassTintOpacity))
+            let tint = containerBackgroundColor.withAlphaComponent(CGFloat(tintOpacity))
             // One material for the whole detached card lets terminal content
             // show through the gaps without blurring the key labels themselves.
             if #available(iOS 26.0, *) {
-                let glass = UIGlassEffect(style: .regular)
-                glass.tintColor = containerBackgroundColor.withAlphaComponent(0.25)
+                let glass = UIGlassEffect(style: floatingStyle == .clear ? .clear : .regular)
+                glass.tintColor = tint
                 floatingGlass.effect = glass
                 floatingGlass.contentView.backgroundColor = .clear
             } else {
-                floatingGlass.effect = UIBlurEffect(style: .systemThinMaterial)
-                floatingGlass.contentView.backgroundColor = containerBackgroundColor.withAlphaComponent(0.25)
+                floatingGlass.effect = UIBlurEffect(style: floatingStyle == .clear ? .systemUltraThinMaterial : .systemThinMaterial)
+                floatingGlass.contentView.backgroundColor = tint
             }
             controlGlass.effect = nil
             controlGlass.contentView.backgroundColor = toolbar.withAlphaComponent(0.14)
+        } else if isFloating {
+            controlGlass.effect = nil
+            controlGlass.contentView.backgroundColor = toolbar
         } else if #available(iOS 26.0, *), !UIAccessibility.isReduceTransparencyEnabled {
             let glass = UIGlassEffect(style: .clear)
             glass.tintColor = toolbar.withAlphaComponent(0.8)

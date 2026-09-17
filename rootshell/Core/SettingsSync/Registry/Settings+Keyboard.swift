@@ -11,6 +11,7 @@ extension Ghostty.OptionKeyAsAlt: SettingValue {}
 extension DrawerToggleMode: SettingValue {}
 extension TerminalWritingAssistanceMode: SettingValue {}
 extension KeyboardArrowJoystickButton.Mode: SettingValue {}
+extension TerminalTouchKeyboardModel.FloatingGlassStyle: SettingValue {}
 
 nonisolated extension Settings {
     enum Keyboard {
@@ -35,6 +36,13 @@ nonisolated extension Settings {
         static let touchThemeAware = SettingKey(
             "terminalTouchKeyboardThemeAware", default: true, group: .keyboard, policy: .localByDefault,
             configKey: "terminal-touch-keyboard-theme-aware", title: String(localized: "Follow Terminal Theme"))
+        static let touchFloatingGlassStyle = SettingKey(
+            "terminalTouchKeyboardFloatingGlassStyle", default: TerminalTouchKeyboardModel.FloatingGlassStyle.regular,
+            group: .keyboard, policy: .localByDefault,
+            configKey: "terminal-touch-keyboard-floating-glass-style", title: String(localized: "Detached Keyboard Glass Style"))
+        static let touchFloatingGlassTintOpacity = SettingKey(
+            "terminalTouchKeyboardFloatingGlassTintOpacity", default: 0.25, group: .keyboard, policy: .localByDefault,
+            configKey: "terminal-touch-keyboard-floating-glass-tint-opacity", title: String(localized: "Detached Keyboard Tint Strength"))
 
         static let writingAssistance = SettingKey(
             "terminalWritingAssistanceMode", default: TerminalWritingAssistanceMode.off, group: .keyboard,
@@ -58,6 +66,7 @@ nonisolated extension Settings {
             optionKeyAsAlt.erased, forceASCIIKeyboard.erased, doubleSpaceForPeriod.erased, composeAutocorrect.erased,
             writingAssistance.erased, touchEnabled.erased, touchSuggestions.erased, touchHaptics.erased,
             touchCompactHeight.erased, touchGlyphs.erased, touchThemeAware.erased, touchLetterPrediction.erased,
+            touchFloatingGlassStyle.erased, touchFloatingGlassTintOpacity.erased,
         ]
     }
 

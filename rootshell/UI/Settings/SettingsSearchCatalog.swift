@@ -156,7 +156,8 @@ extension SettingsSearchDestination {
         case .touchKeyboard:
             Meta(section: .terminal, title: String(localized: "Terminal Keyboard"), systemImage: "keyboard.badge.ellipsis",
                  keywords: ["custom keyboard", "qwerty", "vim", "emacs", "nano", "agent", "suggestions", "haptics",
-                            "letter prediction", "typing accuracy", "touch accuracy"])
+                            "letter prediction", "typing accuracy", "touch accuracy", "detached", "floating",
+                            "glass", "tint", "transparency"])
         case .toolbarKeys:
             Meta(section: .terminal, title: String(localized: "Toolbar Keys"), systemImage: "keyboard",
                  keywords: ["toolbar", "custom keys"])

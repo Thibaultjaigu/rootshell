@@ -24,6 +24,23 @@ nonisolated enum KeyboardToolbarOverflow {
 
 /// Platform-independent behavior shared by the touch surface and its tests.
 nonisolated enum TerminalTouchKeyboardModel {
+    enum FloatingGlassStyle: String, CaseIterable, Sendable {
+        case regular, clear, solid
+
+        var displayName: String {
+            switch self {
+            case .regular: String(localized: "Regular")
+            case .clear: String(localized: "Clear")
+            case .solid: String(localized: "Solid")
+            }
+        }
+    }
+
+    /// Config files can supply values outside the slider's range.
+    static func floatingGlassTintOpacity(_ value: Double) -> Double {
+        value.isFinite ? min(1, max(0, value)) : 0.25
+    }
+
     enum Modifier: Int, CaseIterable, Sendable {
         // Matches KeyModifiers without importing UIKit into the model.
         case control = 1, alt = 2, command = 4, shift = 8

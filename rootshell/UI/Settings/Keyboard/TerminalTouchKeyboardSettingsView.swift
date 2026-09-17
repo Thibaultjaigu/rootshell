@@ -1,8 +1,19 @@
 import SwiftUI
 
 struct TerminalTouchKeyboardSettingsView: View {
+    @Setting(Settings.Keyboard.touchFloatingGlassStyle) private var floatingGlassStyle
+    @Setting(Settings.Keyboard.touchFloatingGlassTintOpacity) private var floatingGlassTintOpacity
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @State private var sample = ""
     @State private var previewHeight: CGFloat = 280
+    @State private var previewFloating = false
+
+    private var tintOpacity: Binding<Double> {
+        Binding(
+            get: { TerminalTouchKeyboardModel.floatingGlassTintOpacity(floatingGlassTintOpacity) },
+            set: { floatingGlassTintOpacity = $0 }
+        )
+    }
 
     var body: some View {
         List {
@@ -13,6 +24,14 @@ struct TerminalTouchKeyboardSettingsView: View {
                 Text("An optional English QWERTY keyboard for terminal sessions. Switch to Apple's keyboard for other languages, swipe typing, emoji, or dictation.")
             }
             Section {
+                if UIDevice.current.userInterfaceIdiom == .pad {
+                    Picker("Preview Placement", selection: $previewFloating) {
+                        Text("Docked").tag(false)
+                        Text("Detached").tag(true)
+                    }
+                    .pickerStyle(.segmented)
+                    .themedRow()
+                }
                 VStack(alignment: .leading, spacing: 12) {
                     HStack(alignment: .top, spacing: 8) {
                         Text("❯").foregroundStyle(.secondary)
@@ -26,8 +45,11 @@ struct TerminalTouchKeyboardSettingsView: View {
                     .padding(.horizontal, 12)
                     .padding(.top, 12)
                     .frame(minHeight: 58)
-                    TerminalTouchKeyboardPreview(sample: $sample, height: $previewHeight)
+                    TerminalTouchKeyboardPreview(sample: $sample, height: $previewHeight, floating: previewFloating)
                         .frame(height: previewHeight)
+                        .frame(maxWidth: previewFloating ? 320 : .infinity)
+                        .padding(previewFloating ? 12 : 0)
+                        .frame(maxWidth: .infinity)
                 }
                 .clipShape(RoundedRectangle(cornerRadius: 16))
                 .listRowInsets(EdgeInsets())
@@ -67,6 +89,43 @@ struct TerminalTouchKeyboardSettingsView: View {
             } footer: {
                 Text("Match the active terminal’s colors, including tab and window themes. Key labels keep their contrast in every mode.")
             }
+            if UIDevice.current.userInterfaceIdiom == .pad {
+                Section {
+                    Picker("Glass Style", selection: $floatingGlassStyle) {
+                        ForEach(TerminalTouchKeyboardModel.FloatingGlassStyle.allCases, id: \.self) { style in
+                            Text(style.displayName).tag(style)
+                        }
+                    }
+                    .settingContextMenu(Settings.Keyboard.touchFloatingGlassStyle)
+                    .themedRow()
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Text("Tint Strength")
+                                .settingRow(Settings.Keyboard.touchFloatingGlassTintOpacity)
+                            Spacer()
+                            Text(tintOpacity.wrappedValue, format: .wholePercent)
+                                .foregroundStyle(.secondary)
+                                .monospacedDigit()
+                        }
+                        Slider(value: tintOpacity, in: 0...1, step: 0.05) {
+                            Text("Tint Strength")
+                        }
+                    }
+                    .disabled(floatingGlassStyle == .solid || reduceTransparency)
+                    .themedRow()
+                    Button {
+                        _floatingGlassStyle.reset()
+                        _floatingGlassTintOpacity.reset()
+                    } label: {
+                        Label("Reset to Defaults", systemImage: "arrow.counterclockwise")
+                    }
+                    .themedRow()
+                } header: {
+                    Text("Detached Keyboard")
+                } footer: {
+                    Text("Customize the detached keyboard’s background. Clear reveals more content; Solid removes transparency. Tint Strength adjusts how much of the keyboard’s background color is added. Older iPadOS versions use blur. Reduce Transparency always uses a solid background.")
+                }
+            }
             Section("Terminal tools") {
                 if UIDevice.current.userInterfaceIdiom == .pad {
                     Text("On iPad, pinch inward to float the keyboard. Drag the … handle to move it. Spread two fingers or double-tap the handle to dock. Docking hides the keys when a hardware keyboard is connected.")
@@ -93,6 +152,7 @@ struct TerminalTouchKeyboardSettingsView: View {
 private struct TerminalTouchKeyboardPreview: UIViewRepresentable {
     @Binding var sample: String
     @Binding var height: CGFloat
+    var floating: Bool
 
     final class Coordinator: TerminalTouchKeyboardHost {
         var parent: TerminalTouchKeyboardPreview
@@ -128,6 +188,7 @@ private struct TerminalTouchKeyboardPreview: UIViewRepresentable {
     func makeUIView(context: Context) -> TerminalTouchKeyboardView {
         let view = TerminalTouchKeyboardView()
         view.host = context.coordinator
+        view.setFloating(floating)
         view.onHeightChanged = { [weak view, weak coordinator = context.coordinator] in
             guard let view else { return }
             coordinator?.parent.height = view.intrinsicContentSize.height
@@ -137,6 +198,7 @@ private struct TerminalTouchKeyboardPreview: UIViewRepresentable {
     func updateUIView(_ view: TerminalTouchKeyboardView, context: Context) {
         let coordinator = context.coordinator
         coordinator.parent = self
+        view.setFloating(floating)
         if coordinator.lastSample != sample {
             coordinator.predictionContext.reset()
             coordinator.lastSample = sample
