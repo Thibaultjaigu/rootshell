@@ -1314,6 +1314,14 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate, UIGesture
                 drawerButton("Compose") { [weak self] in self?.perform(Model.Key(title: "Compose", action: .compose)) }
                 drawerButton("Paste") { [weak self] in self?.perform(Model.Key(title: "Paste", action: .paste)) }
             }
+            for command in preset.slashCommands {
+                drawerButton(command) { [weak self] in
+                    guard let self else { return }
+                    // Commands stay literal even with Shift or Control latched.
+                    self.modifierState.consume()
+                    self.perform(Model.Key(title: command, action: .text(command)), modifiers: [])
+                }
+            }
         }
         updateModifierAppearance()
         setNeedsLayout()

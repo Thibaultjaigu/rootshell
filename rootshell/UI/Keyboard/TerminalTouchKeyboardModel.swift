@@ -479,6 +479,14 @@ nonisolated enum TerminalTouchKeyboardModel {
     enum Preset: String, CaseIterable {
         case shell = "Shell", vim = "Vim", emacs = "Emacs", nano = "Nano", agent = "Agent"
 
+        /// Insert literal text so commands can take arguments before Return.
+        /// Availability depends on the coding agent running in the terminal.
+        var slashCommands: [String] {
+            guard self == .agent else { return [] }
+            return ["/model", "/copy", "/help", "/clear", "/compact", "/resume",
+                    "/status", "/diff", "/review", "/plan", "/init", "/exit"]
+        }
+
         var shortcuts: [Shortcut] {
             func ctrl(_ title: String, _ key: String) -> Shortcut { Shortcut(title: title, key: key, modifiers: 1) }
             switch self {
