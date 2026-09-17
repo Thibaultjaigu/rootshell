@@ -202,7 +202,11 @@ private final class TerminalKeyboardPageSwipe: UIGestureRecognizer {
         origin = touch.location(in: view)
     }
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent) {
-        guard let touch = touches.first else { return }
+        // A second contact may have been rejected by the delegate (for example
+        // over a toolbar control), so recheck the event before recognizing.
+        guard event.allTouches?.count == 1, let touch = touches.first else {
+            state = .failed; return
+        }
         let point = touch.location(in: view)
         let delta = CGPoint(x: point.x - origin.x, y: point.y - origin.y)
         if let offset = TerminalTouchKeyboardModel.pageSwipe(translation: delta) {
@@ -215,6 +219,18 @@ private final class TerminalKeyboardPageSwipe: UIGestureRecognizer {
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent) { state = .failed }
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent) { state = .cancelled }
     override func reset() { super.reset(); offset = 0 }
+
+    override func canPrevent(_ preventedGestureRecognizer: UIGestureRecognizer) -> Bool {
+        // This includes UIKit's native floating-keyboard pinch recognizer on
+        // an ancestor. A one-finger stroke must never lock out a later pinch.
+        if preventedGestureRecognizer is UIPinchGestureRecognizer { return false }
+        // UIKit may use a custom recognizer for its floating transition rather
+        // than a UIPinchGestureRecognizer subclass. Yield to the hosting views
+        // without depending on any private UIKit class name.
+        if let host = preventedGestureRecognizer.view, let view,
+           host !== view, view.isDescendant(of: host) { return false }
+        return super.canPrevent(preventedGestureRecognizer)
+    }
 }
 
 final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate, UIGestureRecognizerDelegate {
@@ -234,6 +250,24 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate, UIGesture
     var onCustomize: (() -> Void)?
     var onToolbarAction: ((String) -> Void)?
     var onHeightChanged: (() -> Void)?
+    /// Only the app-contained host supports our explicit placement requests.
+    /// Native placement must remain under UIKit's control.
+    var usesSystemPlacement = false {
+        didSet {
+            guard oldValue != usesSystemPlacement else { return }
+            placementPinch?.isEnabled = !usesSystemPlacement
+            placementDockTap?.isEnabled = !usesSystemPlacement
+            pinchPlacement = nil
+            cancelInteraction()
+            refreshPlacementActions()
+            invalidateIntrinsicContentSize()
+            setNeedsLayout()
+            onHeightChanged?()
+        }
+    }
+    private var placementPinch: UIPinchGestureRecognizer?
+    private var placementDockTap: UITapGestureRecognizer?
+    private var pinchPlacement: Model.Placement?
     var onPlacementRequested: ((Model.Placement) -> Void)? { didSet { refreshPlacementActions() } }
     var onFloatingDrag: ((CGPoint, Bool) -> Void)?
     var onFloatingDragCancelled: (() -> Void)?
@@ -418,11 +452,16 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate, UIGesture
         grabber.addGestureRecognizer(drag)
         let dock = UITapGestureRecognizer(target: self, action: #selector(dockKeyboard))
         dock.numberOfTapsRequired = 2
+        dock.isEnabled = !usesSystemPlacement
         dock.require(toFail: drag)
+        placementDockTap = dock
         grabber.addGestureRecognizer(dock)
         if traitCollection.userInterfaceIdiom == .pad {
             let pinch = UIPinchGestureRecognizer(target: self, action: #selector(pinchKeyboard(_:)))
             pinch.cancelsTouchesInView = true
+            pinch.delegate = self
+            pinch.isEnabled = !usesSystemPlacement
+            placementPinch = pinch
             addGestureRecognizer(pinch)
         }
         loadToolbarConfiguration()
@@ -485,11 +524,15 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate, UIGesture
 
     private func refreshPlacementActions() {
         let keyboardSwitch = rows.flatMap { $0 }.first { $0.key.action == .switchKeyboard }
+        grabber.accessibilityHint = usesSystemPlacement
+            ? String(localized: "Drag to move.")
+            : String(localized: "Drag to move. Double-tap to dock.")
         guard traitCollection.userInterfaceIdiom == .pad, onPlacementRequested != nil else {
             keyboardSwitch?.accessibilityCustomActions = nil
+            grabber.accessibilityCustomActions = nil
             return
         }
-        keyboardSwitch?.accessibilityCustomActions = [UIAccessibilityCustomAction(name: isFloating ? String(localized: "Dock Keyboard") : String(localized: "Float Keyboard")) { [weak self] _ in
+        keyboardSwitch?.accessibilityCustomActions = usesSystemPlacement ? nil : [UIAccessibilityCustomAction(name: isFloating ? String(localized: "Dock Keyboard") : String(localized: "Float Keyboard")) { [weak self] _ in
             guard let self else { return false }
             self.cancelInteraction()
             self.onPlacementRequested?(self.isFloating ? .docked : .floating)
@@ -506,27 +549,48 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate, UIGesture
     }
 
     @objc private func pinchKeyboard(_ gesture: UIPinchGestureRecognizer) {
-        guard onPlacementRequested != nil else { return }
-        if gesture.state == .began { cancelInteraction() }
-        guard gesture.state == .changed || gesture.state == .ended else { return }
-        let current: Model.Placement = isFloating ? .floating : .docked
-        let destination = Model.placementAfterPinch(gesture.scale, from: current)
-        if destination != current { onPlacementRequested?(destination) }
+        guard !usesSystemPlacement, onPlacementRequested != nil else { return }
+        if gesture.state == .began {
+            cancelInteraction()
+            pinchPlacement = isFloating ? .floating : .docked
+        }
+        defer {
+            if gesture.state == .ended || gesture.state == .cancelled || gesture.state == .failed {
+                pinchPlacement = nil
+            }
+        }
+        // Reparenting or reloading an input root while recognition is still in
+        // progress can cancel/reenter UIKit's own input transition. Finish the
+        // gesture first, then move containers on the next main-queue turn.
+        guard gesture.state == .ended, let initialPlacement = pinchPlacement else { return }
+        let destination = Model.placementAfterPinch(gesture.scale, from: initialPlacement)
+        guard destination != initialPlacement else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self, !self.usesSystemPlacement, self.window != nil,
+                  self.isFloating == (initialPlacement == .floating) else { return }
+            self.onPlacementRequested?(destination)
+        }
     }
 
-    @objc private func dockKeyboard() { onPlacementRequested?(.docked) }
+    @objc private func dockKeyboard() {
+        guard !usesSystemPlacement else { return }
+        onPlacementRequested?(.docked)
+    }
 
     @objc private func dragFloatingKeyboard(_ gesture: UIPanGestureRecognizer) {
         guard isFloating else { return }
+        // A system hosting item may be scaled by UIKit and moves during the
+        // pan. Measure in its stationary window so one finger-point is one
+        // window-point; the app overlay already supplies a stationary parent.
+        let translation = gesture.translation(in: usesSystemPlacement ? window : superview)
         #if DEBUG
         if gesture.state != .changed {
-            let translation = gesture.translation(in: superview)
             Ghostty.logger.debug("Touch keyboard handle pan: \(gesture.state.rawValue), translation: \(String(describing: translation))")
         }
         #endif
         switch gesture.state {
-        case .began, .changed: onFloatingDrag?(gesture.translation(in: superview), false)
-        case .ended: onFloatingDrag?(gesture.translation(in: superview), true)
+        case .began, .changed: onFloatingDrag?(translation, false)
+        case .ended: onFloatingDrag?(translation, true)
         case .cancelled, .failed: onFloatingDragCancelled?()
         default: break
         }
@@ -1142,7 +1206,10 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate, UIGesture
     func sendRawData(_ data: Data) { guard canSend else { return }; sequenceDelegate?.sendRawData(data) }
 
     private func showPreview(_ cap: TerminalTouchKeycap, modifiers: Int? = nil) {
-        guard traitCollection.userInterfaceIdiom == .phone, case .text(let text) = cap.key.action, text != " ", !UIAccessibility.isVoiceOverRunning else { return }
+        // Show above-finger feedback in both full-size and detached layouts.
+        let showsPreview = traitCollection.userInterfaceIdiom == .phone
+            || traitCollection.userInterfaceIdiom == .pad
+        guard showsPreview, case .text(let text) = cap.key.action, text != " ", !UIAccessibility.isVoiceOverRunning else { return }
         let shifted = (modifiers ?? modifierState.rawValue) & Model.Modifier.shift.rawValue != 0
         preview.text = shifted ? text.uppercased() : text
         preview.frame = CGRect(x: min(max(2, cap.frame.midX - 26), bounds.width - 54), y: max(0, cap.frame.minY - 49), width: 52, height: 55)
@@ -1223,6 +1290,22 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate, UIGesture
         guard point.y >= toolbarHeight, point.y < bounds.height - bottomInset,
               touch.view !== presets, touch.view?.isDescendant(of: presets) != true else { return false }
         return !contacts.values.contains { $0.trackpad || $0.accent || $0.consumed }
+    }
+
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
+                           shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
+        let other: UIGestureRecognizer
+        if gestureRecognizer === placementPinch {
+            other = otherGestureRecognizer
+        } else if otherGestureRecognizer === placementPinch {
+            other = gestureRecognizer
+        } else {
+            return false
+        }
+        // Adding a second finger while scrolling a tools page must still allow
+        // the app-contained keyboard's placement pinch.
+        if other === drawer.panGestureRecognizer || other is TerminalKeyboardPageSwipe { return true }
+        return false
     }
 
     override func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {

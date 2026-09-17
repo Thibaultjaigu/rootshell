@@ -477,6 +477,14 @@ nonisolated enum TerminalTouchKeyboardModel {
         frame.maxY >= available.maxY - 18 && abs(frame.midX - available.midX) < available.width * 0.2
     }
 
+    /// Preserve UIKit's card size while keeping a dragged native panel on screen.
+    static func clampedFloatingDragFrame(_ frame: CGRect, in available: CGRect) -> CGRect {
+        guard !available.isEmpty, !frame.isEmpty else { return frame }
+        return CGRect(x: min(max(frame.minX, available.minX), max(available.minX, available.maxX - frame.width)),
+                      y: min(max(frame.minY, available.minY), max(available.minY, available.maxY - frame.height)),
+                      width: frame.width, height: frame.height)
+    }
+
     /// Detect an existing native floating input region.
     static func isFloatingInput(width: CGFloat, hostWidth: CGFloat, isPad: Bool) -> Bool {
         isPad && width > 0 && width <= 400 && width < hostWidth - 1

@@ -91,6 +91,12 @@ struct TerminalTouchKeyboardSettingsView: View {
             }
             if UIDevice.current.userInterfaceIdiom == .pad {
                 Section {
+                    SettingToggle(Settings.Keyboard.touchSystemFloating, title: "Use System Detached Keyboard", icon: "keyboard")
+                        .themedRow()
+                } footer: {
+                    Text("Use iPadOS’s floating keyboard container so the keyboard can move beyond the app window. To float or dock in this mode, switch to Apple’s keyboard, change its placement, then switch back using the toolbar’s keyboard button. Turn this off to keep the detached keyboard inside rootshell and use pinch gestures on our keyboard.")
+                }
+                Section {
                     Picker("Glass Style", selection: $floatingGlassStyle) {
                         ForEach(TerminalTouchKeyboardModel.FloatingGlassStyle.allCases, id: \.self) { style in
                             Text(style.displayName).tag(style)
@@ -128,7 +134,7 @@ struct TerminalTouchKeyboardSettingsView: View {
             }
             Section("Terminal tools") {
                 if UIDevice.current.userInterfaceIdiom == .pad {
-                    Text("On iPad, pinch inward to float the keyboard. Drag the … handle to move it. Spread two fingers or double-tap the handle to dock. Docking hides the keys when a hardware keyboard is connected.")
+                    Text("With Use System Detached Keyboard off, pinch inward to float the keyboard. Drag the … handle to move it. Spread two fingers or double-tap the handle to dock. Docking hides the keys when a hardware keyboard is connected.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                         .themedRow()

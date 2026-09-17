@@ -36,6 +36,9 @@ nonisolated extension Settings {
         static let touchThemeAware = SettingKey(
             "terminalTouchKeyboardThemeAware", default: true, group: .keyboard, policy: .localByDefault,
             configKey: "terminal-touch-keyboard-theme-aware", title: String(localized: "Follow Terminal Theme"))
+        static let touchSystemFloating = SettingKey(
+            "terminalTouchKeyboardSystemFloating", default: true, group: .keyboard, policy: .localByDefault,
+            configKey: "terminal-touch-keyboard-system-floating", title: String(localized: "Use System Detached Keyboard"))
         static let touchFloatingGlassStyle = SettingKey(
             "terminalTouchKeyboardFloatingGlassStyle", default: TerminalTouchKeyboardModel.FloatingGlassStyle.regular,
             group: .keyboard, policy: .localByDefault,
@@ -66,7 +69,7 @@ nonisolated extension Settings {
             optionKeyAsAlt.erased, forceASCIIKeyboard.erased, doubleSpaceForPeriod.erased, composeAutocorrect.erased,
             writingAssistance.erased, touchEnabled.erased, touchSuggestions.erased, touchHaptics.erased,
             touchCompactHeight.erased, touchGlyphs.erased, touchThemeAware.erased, touchLetterPrediction.erased,
-            touchFloatingGlassStyle.erased, touchFloatingGlassTintOpacity.erased,
+            touchSystemFloating.erased, touchFloatingGlassStyle.erased, touchFloatingGlassTintOpacity.erased,
         ]
     }
 
