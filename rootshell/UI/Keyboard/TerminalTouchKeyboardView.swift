@@ -757,12 +757,17 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate, UIGesture
             let presetHeight: CGFloat = toolPage == .shortcuts ? 38 : 0
             drawer.frame = CGRect(x: leading + 5, y: y + presetHeight, width: max(0, width - 10), height: max(0, contentHeight - presetHeight))
             let cellWidth = drawer.bounds.width / CGFloat(drawerColumns)
-            let cellHeight: CGFloat = compact ? 40 : 46
+            let rowCount = (drawerButtons.count + drawerColumns - 1) / drawerColumns
+            let preferredCellHeight: CGFloat = compact ? 40 : 46
+            // Fit every navigation key, including F12, without scrolling.
+            let cellHeight = toolPage == .navigation
+                ? min(preferredCellHeight, drawer.bounds.height / CGFloat(max(1, rowCount)))
+                : preferredCellHeight
             for (i, button) in drawerButtons.enumerated() {
                 button.frame = CGRect(x: CGFloat(i % drawerColumns) * cellWidth + 2, y: CGFloat(i / drawerColumns) * cellHeight + 2,
-                                      width: max(0, cellWidth - 4), height: cellHeight - 4)
+                                      width: max(0, cellWidth - 4), height: max(0, cellHeight - 4))
             }
-            drawer.contentSize = CGSize(width: drawer.bounds.width, height: CGFloat((drawerButtons.count + drawerColumns - 1) / drawerColumns) * cellHeight)
+            drawer.contentSize = CGSize(width: drawer.bounds.width, height: CGFloat(rowCount) * cellHeight)
         }
         suggestions.isHidden = !suggestionsEnabled || drawerOpen
         if suggestionsEnabled {
@@ -1299,10 +1304,6 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate, UIGesture
                         ("Home", "\u{1b}[H"), ("End", "\u{1b}[F"), ("PgUp", "\u{1b}[5~"), ("PgDn", "\u{1b}[6~"), ("Delete", "\u{1b}[3~")]
             for (title, key) in keys { drawerButton(title, repeats: true) { [weak self] in self?.keyPressed(key, modifiers: []) } }
             for index in 1...12 { drawerButton("F\(index)") { [weak self] in self?.keyPressed("F\(index)", modifiers: []) } }
-            drawerButton("Cmd") { [weak self] in
-                guard let self else { return }; self.modifierState.begin(.command)
-                self.modifierState.end(.command, at: ProcessInfo.processInfo.systemUptime); self.publishModifiers()
-            }
         case .shortcuts:
             for shortcut in preset.shortcuts {
                 drawerButton(shortcut.title, subtitle: shortcut.chord) { [weak self] in
