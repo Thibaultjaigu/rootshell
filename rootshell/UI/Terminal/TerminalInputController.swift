@@ -39,6 +39,10 @@ final class TerminalInputController {
     /// Physical Option-key side tracking for Option-as-Alt and AltGr normalization.
     var heldOptionSide: Ghostty.HeldOptionSide = .none
 
+    /// UIKit's logical modifier identities, including system remaps. Used to
+    /// preserve a second modifier key when mod-tap substitutes the first.
+    var heldModifierKeys: Set<UIKeyboardHIDUsage> = []
+
     /// Physical Control-key side tracking for AltGr normalization and right-Control reporting.
     var heldControlSide: Ghostty.HeldControlSide = .none
 

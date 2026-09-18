@@ -720,6 +720,17 @@ struct KeyTrigger: Codable, Hashable, CustomStringConvertible, Sendable {
         return KeyTrigger(key: symbol, modifiers: modifiers.subtracting(.shift))
     }
 
+    /// Match Command shortcuts expressed either as a base key plus Shift or
+    /// as the shifted symbol (Cmd+Shift+[ and Cmd+{). This is needed even when
+    /// UIKit delivered every modifier correctly, before mod-tap substitution.
+    /// Explicit base-key bindings win; Option and Control remain part of the
+    /// alias so a less-modified shortcut cannot claim a different chord.
+    func resolvingShiftedSymbol(isClaimed: (KeyTrigger) -> Bool) -> KeyTrigger {
+        guard modifiers.contains(.command), let symbol = shiftedSymbolEquivalent,
+              !isClaimed(self), isClaimed(symbol) else { return self }
+        return symbol
+    }
+
     /// Parse from ghostty config format: "cmd+shift+d" or "ctrl+a"
     init?(ghosttyFormat: String) {
         let parts = ghosttyFormat.lowercased().components(separatedBy: "+")
