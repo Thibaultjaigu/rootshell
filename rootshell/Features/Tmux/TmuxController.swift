@@ -60,33 +60,6 @@ private extension ConnectionConfig {
     }
 }
 
-/// A node in a tmux window's layout tree, decoded from the opaque
-/// `ghostty_tmux_layout_*` accessors. Geometry is in terminal cells.
-///
-/// `nonisolated`: built by `TmuxReconcileDecoder.decode` on the off-main action
-/// callback thread (see that type), so it must NOT pick up the project's default
-/// `@MainActor` isolation. A pure value type — safe to construct/read anywhere.
-nonisolated indirect enum TmuxLayoutNode: Equatable {
-    case pane(paneId: Int, width: Int, height: Int, x: Int, y: Int)
-    case split(direction: Direction, children: [TmuxLayoutNode], width: Int, height: Int, x: Int, y: Int)
-
-    enum Direction: Equatable { case horizontal, vertical }
-
-    var width: Int {
-        switch self {
-        case let .pane(_, w, _, _, _): return w
-        case let .split(_, _, w, _, _, _): return w
-        }
-    }
-
-    var height: Int {
-        switch self {
-        case let .pane(_, _, h, _, _): return h
-        case let .split(_, _, _, h, _, _): return h
-        }
-    }
-}
-
 /// A single tmux reconcile operation, decoded from the C op batch.
 ///
 /// `nonisolated`: produced by `TmuxReconcileDecoder.decode` on the off-main
@@ -1315,10 +1288,34 @@ final class TmuxController {
         return true
     }
 
+    /// Apply equalization on the server; the resulting reconcile owns local geometry.
+    func requestEqualizeSplits(_ tab: TabModel) {
+        guard isActive, !tab.paneMove.isPending, let windowId = tab.tmuxWindowId, windowTabs[windowId] === tab,
+              let ops = lastAppliedTopologyOps else { return }
+        for case let .setLayout(id, layout, zoomedPaneId) in ops where id == windowId {
+            guard let value = layout.equalizedLayoutString() else { return }
+            var command = "select-layout -t @\(windowId) \(TmuxControlModeParser.quote(value))"
+            // select-layout unzooms on tmux 3.6; restore the same pane if needed.
+            if let paneId = zoomedPaneId {
+                command += " ; resize-pane -Z -t %\(paneId)"
+            }
+            let equalizeCommand = command
+            Task { @MainActor [weak self] in
+                guard let self, self.isActive, self.windowTabs[windowId] === tab,
+                      self.lastAppliedTopologyOps == ops else { return }
+                do {
+                    _ = try await self.sendCommandWithReply(equalizeCommand)
+                } catch {
+                    TmuxDebugLogger.shared.event("LAYOUT", "equalize failed: \(error)")
+                }
+            }
+            return
+        }
+    }
+
     /// Returns false when the layout could not be applied (missing tab or a
-    /// pane view the tree references doesn't exist). The tab keeps its stale
-    /// splitTree, so the caller must NOT record the batch as applied — tmux
-    /// re-emits the same topology and the retry is what heals the desync.
+    /// pane view the tree references does not exist). The tab keeps its stale
+    /// splitTree, so the caller must NOT record the batch as applied.
     /// ROOTSHELL-TMUX (id=tmux-reconcile-dedup-failure)
     private func setLayout(windowId: Int, layout: TmuxLayoutNode, zoomedPaneId: Int?) -> Bool {
         guard let tab = windowTabs[windowId] else {

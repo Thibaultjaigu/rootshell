@@ -1,0 +1,29 @@
+name: tmux layout tests
+on:
+  push:
+    paths:
+      - 'rootshell/Features/Tmux/**'
+      - 'rootshell/UI/Shell/MainView+Splits.swift'
+      - 'rootshellTests/TmuxLayoutTests.swift'
+      - 'scripts/test-tmux-layout*'
+      - '.github/workflows/tmux-layout-tests.yml'
+  pull_request:
+    paths:
+      - 'rootshell/Features/Tmux/**'
+      - 'rootshell/UI/Shell/MainView+Splits.swift'
+      - 'rootshellTests/TmuxLayoutTests.swift'
+      - 'scripts/test-tmux-layout*'
+      - '.github/workflows/tmux-layout-tests.yml'
+permissions:
+  contents: read
+jobs:
+  layout:
+    runs-on: ubuntu-latest
+    container: swift:6.2-noble
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install tmux for protocol integration test
+        run: apt-get update && apt-get install -y --no-install-recommends tmux
+      - name: Test layout calculation and tmux round trip
+        run: bash scripts/test-tmux-layout.sh
