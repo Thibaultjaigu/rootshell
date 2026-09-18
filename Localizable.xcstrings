@@ -35761,6 +35761,9 @@
         }
       }
     },
+    "A living reef with schooling fish, swaying kelp, and underwater light" : {
+      "comment" : "Aquarium effect description"
+    },
     "A manual AP with this BSSID already exists." : {
       "localizations" : {
         "ar" : {
@@ -62314,6 +62317,9 @@
         }
       }
     },
+    "Amber Lagoon" : {
+      "comment" : "Aquarium lighting preset"
+    },
     "Ampersand &" : {
       "localizations" : {
         "ar" : {
@@ -71262,6 +71268,18 @@
           }
         }
       }
+    },
+    "Aquarium" : {
+      "comment" : "Background effect name"
+    },
+    "Aquarium Life" : {
+
+    },
+    "Aquarium Lighting" : {
+
+    },
+    "Aquarium Presentation" : {
+
     },
     "Arch Linux" : {
       "localizations" : {
@@ -90576,6 +90594,9 @@
         }
       }
     },
+    "Balanced" : {
+      "comment" : "Aquarium render quality"
+    },
     "Bandwidth limit in KB/s" : {
       "comment" : "SCP help: -l option",
       "localizations" : {
@@ -95840,6 +95861,9 @@
         }
       }
     },
+    "Bloom" : {
+
+    },
     "Blue" : {
       "comment" : "App icon choice: the current default icon",
       "localizations" : {
@@ -99854,6 +99878,9 @@
           }
         }
       }
+    },
+    "Bubbles" : {
+
     },
     "Budget" : {
       "localizations" : {
@@ -105725,6 +105752,9 @@
           }
         }
       }
+    },
+    "Caustic Light" : {
+
     },
     "Cautious" : {
       "comment" : "MCP session mode: cautious security",
@@ -116221,6 +116251,9 @@
           }
         }
       }
+    },
+    "Cinematic" : {
+      "comment" : "Aquarium render quality"
     },
     "Classic Bell" : {
       "comment" : "Bell sound: traditional metal bell",
@@ -127335,6 +127368,9 @@
           }
         }
       }
+    },
+    "Clownfish, blue tangs, butterflyfish, angelfish, and neon tetras swim in a decorative mixed-species scene." : {
+
     },
     "Cluster" : {
       "localizations" : {
@@ -172762,6 +172798,9 @@
         }
       }
     },
+    "Custom Light" : {
+      "comment" : "Aquarium lighting preset"
+    },
     "Custom Locale" : {
       "comment" : "Setting title",
       "localizations" : {
@@ -211720,6 +211759,9 @@
         }
       }
     },
+    "Economical" : {
+      "comment" : "Aquarium render quality"
+    },
     "Ed25519" : {
       "comment" : "SSH key generation: short label for Ed25519",
       "localizations" : {
@@ -238130,6 +238172,9 @@
         }
       }
     },
+    "Exposure" : {
+
+    },
     "Extend Effect Under Pinned Sidebar" : {
       "comment" : "Setting title",
       "localizations" : {
@@ -251116,6 +251161,9 @@
         }
       }
     },
+    "Fish Population" : {
+
+    },
     "Fit to This Window" : {
       "localizations" : {
         "ar" : {
@@ -253279,6 +253327,7 @@
       }
     },
     "Follow Terminal Theme" : {
+      "comment" : "Aquarium lighting preset",
       "localizations" : {
         "ar" : {
           "stringUnit" : {
@@ -262864,6 +262913,9 @@
           }
         }
       }
+    },
+    "Full-screen Aquarium Preview" : {
+
     },
     "Garden" : {
       "comment" : "Butterfly color mode: multi-color from theme palette",
@@ -322942,6 +322994,9 @@
         }
       }
     },
+    "Kelp Density" : {
+
+    },
     "Ken Burns" : {
       "localizations" : {
         "ar" : {
@@ -344091,6 +344146,18 @@
           }
         }
       }
+    },
+    "Light Color" : {
+
+    },
+    "Light Direction" : {
+
+    },
+    "Light Strength" : {
+
+    },
+    "Lighting" : {
+
     },
     "Like Roam/Mosh, it survives network changes and high latency." : {
       "comment" : "Trzsz help: about line 2",
@@ -370033,6 +370100,9 @@
           }
         }
       }
+    },
+    "Moonlit Reef" : {
+      "comment" : "Aquarium lighting preset"
     },
     "more" : {
       "comment" : "SSH help: additional keys count",
@@ -435497,6 +435567,9 @@
         }
       }
     },
+    "Pause Aquarium" : {
+
+    },
     "Paused" : {
       "localizations" : {
         "ar" : {
@@ -466539,6 +466612,12 @@
         }
       }
     },
+    "Reading Protection" : {
+
+    },
+    "Reading Protection softens the effect behind central text. Cinematic targets 60 fps; other modes target 30 fps. Battery Saver lowers quality automatically. Reduce Motion shows a still aquarium." : {
+
+    },
     "README.md" : {
       "localizations" : {
         "ar" : {
@@ -485981,6 +486060,9 @@
         }
       }
     },
+    "Render Quality" : {
+
+    },
     "Rendering" : {
       "localizations" : {
         "ar" : {
@@ -489992,6 +490074,9 @@
           }
         }
       }
+    },
+    "Reset Aquarium to Defaults" : {
+
     },
     "Reset Brightness" : {
       "localizations" : {
@@ -494958,6 +495043,9 @@
           }
         }
       }
+    },
+    "Restores all aquarium settings, including intensity, speed, and a population of 3 fish on iPhone or 8 on other devices." : {
+
     },
     "Restoring..." : {
       "localizations" : {
@@ -507016,6 +507104,9 @@
           }
         }
       }
+    },
+    "Saturation" : {
+
     },
     "Save" : {
       "localizations" : {
@@ -547487,6 +547578,9 @@
         }
       }
     },
+    "Showcase preview · terminal intensity is unchanged" : {
+
+    },
     "Showing %lld active session%@ on Lock Screen" : {
       "localizations" : {
         "ar" : {
@@ -580861,6 +580955,9 @@
           }
         }
       }
+    },
+    "Suspended Particles" : {
+
     },
     "Swap" : {
       "comment" : "Button to swap left and right swipe bindings",
@@ -647884,6 +647981,9 @@
         }
       }
     },
+    "Tropical Daylight" : {
+      "comment" : "Aquarium lighting preset"
+    },
     "Troubleshooting" : {
       "localizations" : {
         "ar" : {
@@ -695005,6 +695105,9 @@
         }
       }
     },
+    "Warmth" : {
+
+    },
     "WARNING: non post-quantum key exchange" : {
       "localizations" : {
         "ar" : {
@@ -695775,6 +695878,12 @@
           }
         }
       }
+    },
+    "Water Current" : {
+
+    },
+    "Water Haze" : {
+
     },
     "Wave Intensity" : {
       "localizations" : {
