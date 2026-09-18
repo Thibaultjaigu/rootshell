@@ -53,9 +53,12 @@ struct Jellyfish: Identifiable, Sendable {
     let oralArmCount: Int
     let oralArmNodesPer: Int
     let tentacleAngles: [Double]        // Attachment azimuths around the three-dimensional margin
+    let originalTentacleAnchorX: [Double] // Flat rim anchors; empty for enhanced anatomy
     let oralArmAnchorX: [Double]        // Unit-space underside x per oral arm
     let colorIndex: Int                 // Per-jelly hue variation
     let visualDepth: Double             // 0 = distant, 1 = near; stable for a whole visit
+
+    var usesOriginalRendering: Bool { !originalTentacleAnchorX.isEmpty }
 
     // Rare bioluminescent shimmer: pre-scheduled ripple start times so the
     // renderer stays a pure function of frame time
@@ -124,9 +127,12 @@ struct Jellyfish: Identifiable, Sendable {
         0.34 + sin((frameTime - spawnFrameTime) * 0.14 + pulsePhase0) * (calmDrift ? 0.01 : 0.07)
     }
 
-    /// Same rim surface as jfBell in Jellyfish.metal. Sharing the projected
-    /// attachment with physics and both renderers prevents floating roots.
+    /// Flat rim for Original, or the projected jfBell surface for Enhanced.
+    /// Sharing attachments with physics keeps the tentacle roots connected.
     func tentacleAnchor(_ chain: Int, at frameTime: TimeInterval) -> CGPoint {
+        if usesOriginalRendering {
+            return CGPoint(x: originalTentacleAnchorX[chain], y: 0.02)
+        }
         let phi = tentacleAngles[chain]
         let pulse = pulseValue(at: frameTime) * (calmDrift ? Self.calmBreathe : 1)
         let lobes = cos(phi * 16 + pulsePhase0)
@@ -213,13 +219,21 @@ struct Jellyfish: Identifiable, Sendable {
     func bellTransform(at frameTime: TimeInterval, in size: CGSize) -> CGAffineTransform {
         let p = renderPosition(at: frameTime, in: size)
         let squash = bellSquash(at: frameTime)
-        // Orient to the steady current, not the instantaneous pulse/surge
-        // velocity. The coast can briefly reverse that derivative; steering
-        // from it makes a bell whip from side to side on every contraction.
         let margin = wanderAmpX * size.width + Double(bellRadius) * 8
         let direction: Double = entryEdge == .left ? 1 : -1
-        let v = CGVector(dx: direction * (size.width + 2 * margin) / crossingDuration,
+        let v: CGVector
+        if usesOriginalRendering {
+            // Preserve the original bell-first swimming pose.
+            let dt = 0.08
+            let p0 = position(at: frameTime - dt, in: size)
+            let p1 = position(at: frameTime + dt, in: size)
+            v = CGVector(dx: (p1.x - p0.x) / (2 * dt), dy: (p1.y - p0.y) / (2 * dt))
+        } else {
+            // Enhanced bells lean into the steady current, avoiding rapid
+            // turns when the instantaneous pulse/surge velocity reverses.
+            v = CGVector(dx: direction * (size.width + 2 * margin) / crossingDuration,
                          dy: exitYDrift * size.height / crossingDuration)
+        }
         var ax = avoidVel.dx * 0.5
         var ay = avoidVel.dy * 0.5
         let speed = max((v.dx * v.dx + v.dy * v.dy).squareRoot(), 4)
@@ -234,8 +248,9 @@ struct Jellyfish: Identifiable, Sendable {
             + sin(2 * .pi * wanderFreqY * elapsed + wanderPhaseY) * 0.025
         let lean = atan2(v.dx + ax, speed * 1.8 + abs(v.dy + ay) * 0.35) * 0.75
             + sway * (calmDrift ? 0.15 : 1)
+        let rotation = usesOriginalRendering ? atan2((v.dy + ay) * 0.35, v.dx + ax) + .pi / 2 : lean
         return CGAffineTransform(translationX: p.x, y: p.y)
-            .rotated(by: lean)
+            .rotated(by: rotation)
             .scaledBy(x: bellRadius * squash.x, y: bellRadius * squash.y)
     }
 

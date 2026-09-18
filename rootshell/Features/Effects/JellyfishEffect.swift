@@ -4,8 +4,8 @@
 //
 //  Bioluminescent jellyfish that occasionally drift across the terminal
 //  background — slower and calmer than any other effect. A translucent
-//  Metal scene renders their anatomy and bioluminescence, with a Canvas
-//  fallback. Rendering is fully paused between visits. On dark
+//  Metal scene renders their anatomy and bioluminescence, with the original
+//  Canvas renderer available as an option. Rendering pauses between visits. On dark
 //  themes they glow under the additive overlay blend; on light themes they
 //  read as an ink-wash drawing under multiply.
 //
@@ -55,6 +55,22 @@ final class JellyfishEffect: TerminalEffect, ObservableObject {
     let configurationDidChange = PassthroughSubject<Void, Never>()
 
     // MARK: - Jellyfish-Specific Configuration
+
+    enum RenderingStyle: String, Codable, CaseIterable {
+        case original
+        case enhanced
+
+        var displayName: String {
+            switch self {
+            case .original: return String(localized: "Original", comment: "Original jellyfish rendering style")
+            case .enhanced: return String(localized: "Enhanced", comment: "Detailed jellyfish rendering style")
+            }
+        }
+    }
+
+    var renderingStyle: RenderingStyle = .enhanced {
+        didSet { objectWillChange.send(); configurationDidChange.send() }
+    }
 
     /// How often visits occur
     var visitFrequency: JellyfishVisitState.VisitFrequency = .occasional {
@@ -117,6 +133,7 @@ final class JellyfishEffect: TerminalEffect, ObservableObject {
     }
 
     func resetToDefaults() {
+        renderingStyle = .enhanced
         intensity = 0.20
         speed = 0.5
         visitFrequency = .occasional
@@ -129,6 +146,7 @@ final class JellyfishEffect: TerminalEffect, ObservableObject {
 
     func encodeConfiguration() -> [String: Any] {
         return [
+            "renderingStyle": renderingStyle.rawValue,
             "intensity": intensity,
             "speed": speed,
             "visitFrequency": visitFrequency.rawValue,
@@ -141,6 +159,7 @@ final class JellyfishEffect: TerminalEffect, ObservableObject {
     }
 
     func decodeConfiguration(_ data: [String: Any]) {
+        renderingStyle = (data["renderingStyle"] as? String).flatMap(RenderingStyle.init(rawValue:)) ?? .enhanced
         if let intensity = data["intensity"] as? Double {
             self.intensity = intensity
         }
@@ -296,6 +315,19 @@ struct JellyfishView: View {
     var previewMode: Bool = false
     var showcase: Bool = false
 
+    var body: some View {
+        JellyfishContentView(effect: effect, previewMode: previewMode, showcase: showcase)
+            // Each renderer owns its simulation and display loop. Replacing
+            // the content releases Metal resources and respawns the anatomy.
+            .id(effect.renderingStyle)
+    }
+}
+
+private struct JellyfishContentView: View {
+    @ObservedObject var effect: JellyfishEffect
+    let previewMode: Bool
+    let showcase: Bool
+
     @Environment(\.terminalEffectRetainsState) private var retainsState
     @StateObject private var state = JellyfishVisitState()
     @State private var useCanvasFallback = false
@@ -309,7 +341,7 @@ struct JellyfishView: View {
     var body: some View {
         GeometryReader { geometry in
             Group {
-                if useCanvasFallback {
+                if effect.renderingStyle == .original || useCanvasFallback {
                     TimelineView(.animation(minimumInterval: frameInterval, paused: state.isIdle)) { timeline in
                         let frameTime = state.frameTime(at: timeline.date)
                         Canvas { context, size in
@@ -433,7 +465,7 @@ struct JellyfishView: View {
     private func drawTentacles(_ jelly: Jellyfish, at time: TimeInterval, transform: CGAffineTransform, colors: JellyfishColors, isLight: Bool, in ctx: inout GraphicsContext) {
         let shimmer = (!isLight && effect.shimmerEnabled && !jelly.calmDrift) ? jelly.shimmer(at: time) : nil
 
-        for chain in jelly.tentacleAngles.indices {
+        for chain in 0..<jelly.tentacleCount {
             let anchor = jelly.tentacleAnchor(chain, at: time).applying(transform)
             let start = chain * jelly.tentacleNodesPer
             let slice = jelly.tentacleNodes[start..<(start + jelly.tentacleNodesPer)]

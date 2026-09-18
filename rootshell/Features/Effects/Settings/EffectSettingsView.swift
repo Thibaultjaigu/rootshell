@@ -1498,6 +1498,20 @@ private struct JellyfishSettingsSection: View {
     @State private var visitAcknowledged = false
 
     var body: some View {
+        Section {
+            Picker("Rendering", selection: Binding(
+                get: { effect.renderingStyle },
+                set: { effect.renderingStyle = $0 }
+            )) {
+                ForEach(JellyfishEffect.RenderingStyle.allCases, id: \.self) { style in
+                    Text(style.displayName).tag(style)
+                }
+            }
+            .themedRow()
+        } footer: {
+            Text("Original uses simpler graphics for lower GPU usage. Enhanced adds translucent detail and richer glow.")
+        }
+
         Section("Visits") {
             Picker("Frequency", selection: Binding(
                 get: { effect.visitFrequency },

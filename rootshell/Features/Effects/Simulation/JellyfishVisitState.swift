@@ -282,6 +282,7 @@ final class JellyfishVisitState: ObservableObject {
             // that would retain the node arrays and force a COW copy of
             // them on every write below
             let bellRadius = Double(jellies[i].bellRadius)
+            let original = jellies[i].usesOriginalRendering
             let calm = jellies[i].calmDrift
             let phase0 = jellies[i].pulsePhase0
             let seeding = jellies[i].lastSimTime == nil
@@ -294,6 +295,7 @@ final class JellyfishVisitState: ObservableObject {
             let transform = jellies[i].bellTransform(at: frameTime, in: size)
             let stiffness = calm ? K.calmStiffness : K.stiffness
             let swayScale = calm ? 0.25 : 1.0
+            let swayAmp = original ? 5.0 : K.swayAmp
 
             func stepChains(_ kp: WritableKeyPath<Jellyfish, [CGPoint]>,
                             count: Int, oral: Bool,
@@ -303,7 +305,7 @@ final class JellyfishVisitState: ObservableObject {
                         : jellies[i].tentacleAnchor(chain, at: frameTime)
                     var parent = anchor.applying(transform)
                     let chainPhase = phase0 + Double(chain) * 1.7
-                    let segmentLength = segLen * (0.90 + 0.16 * cos(chainPhase))
+                    let segmentLength = original ? segLen : segLen * (0.90 + 0.16 * cos(chainPhase))
                     for k in 0..<nodesPer {
                         let idx = chain * nodesPer + k
                         if seeding {
@@ -319,7 +321,7 @@ final class JellyfishVisitState: ObservableObject {
                         // Tissue emerges down from the bell before water
                         // drag bends it into the wake. Without this root
                         // tangent, a fast preview cuts strings across the rim.
-                        if k == 0 { dx = transform.c; dy = transform.d }
+                        if k == 0 && !original { dx = transform.c; dy = transform.d }
                         let len = (dx * dx + dy * dy).squareRoot()
                         if len < 0.001 {
                             dx = 0; dy = segmentLength
@@ -331,7 +333,7 @@ final class JellyfishVisitState: ObservableObject {
                         p.x += (parent.x + dx - p.x) * follow
                         p.y += (parent.y + dy - p.y) * follow
                         // Water current + settle, phase-offset down the chain
-                        p.x += K.swayAmp * sin(2 * .pi * K.swayFreq * frameTime + chainPhase + Double(k) * 0.8) * dt * swayScale
+                        p.x += swayAmp * sin(2 * .pi * K.swayFreq * frameTime + chainPhase + Double(k) * 0.8) * dt * swayScale
                         p.y += K.sinkBias * dt * Double(k) / Double(nodesPer)
                         jellies[i][keyPath: kp][idx] = p
                         parent = p
@@ -342,11 +344,11 @@ final class JellyfishVisitState: ObservableObject {
             stepChains(\.tentacleNodes,
                        count: jellies[i].tentacleCount, oral: false,
                        nodesPer: jellies[i].tentacleNodesPer,
-                       segLen: bellRadius * K.segLenFactor)
+                       segLen: bellRadius * (original ? 0.50 : K.segLenFactor))
             stepChains(\.oralArmNodes,
                        count: jellies[i].oralArmCount, oral: true,
                        nodesPer: jellies[i].oralArmNodesPer,
-                       segLen: bellRadius * K.armSegLenFactor)
+                       segLen: bellRadius * (original ? 0.68 : K.armSegLenFactor))
 
             jellies[i].lastSimTime = frameTime
         }
@@ -676,22 +678,32 @@ final class JellyfishVisitState: ObservableObject {
             ? Double.random(in: 18...30)
             : Double.random(in: 45...120)) / speed
         let visualDepth = Double.random(in: 0...1)
+        let original = effect?.renderingStyle == .original
         let previewRadius = min(max(min(viewSize.height * 0.12, viewSize.width * 0.13), 18), 72)
-        let bellRadius = (previewMode ? previewRadius : CGFloat.random(in: 34...58)) * (0.78 + visualDepth * 0.22)
+        let bellRadius = original
+            ? (previewMode ? CGFloat.random(in: 14...20) : CGFloat.random(in: 26...44))
+            : (previewMode ? previewRadius : CGFloat.random(in: 34...58)) * (0.78 + visualDepth * 0.22)
         // Show the creature immediately in settings, including the full-size
         // showcase, instead of spending its first ten seconds offscreen.
         let spawnFrameTime = previewMode ? spawnFrameTime - crossingDuration * 0.42 : spawnFrameTime
 
-        let tentacleCount = Int.random(in: 10...16)
+        let tentacleCount = original ? Int.random(in: 6...10) : Int.random(in: 10...16)
         let tentacleNodesPer = 7
-        let oralArmCount = 4
+        let oralArmCount = original ? Int.random(in: 2...4) : 4
         let oralArmNodesPer = 9
 
-        // Marginal filaments encircle the bell; oral arms cluster centrally.
+        // Original Canvas anatomy spreads fewer filaments along a flat rim.
+        // Enhanced filaments encircle the bell; oral arms cluster centrally.
         var angles: [Double] = []
+        var originalAnchors: [Double] = []
         for i in 0..<tentacleCount {
-            let t = Double(i) / Double(tentacleCount)
-            angles.append(2 * .pi * t + Double.random(in: -0.035...0.035))
+            if original {
+                let t = Double(i) / Double(tentacleCount - 1)
+                originalAnchors.append(-0.85 + 1.70 * t + Double.random(in: -0.04...0.04))
+            } else {
+                let t = Double(i) / Double(tentacleCount)
+                angles.append(2 * .pi * t + Double.random(in: -0.035...0.035))
+            }
         }
         var armAnchors: [Double] = []
         for i in 0..<oralArmCount {
@@ -730,6 +742,7 @@ final class JellyfishVisitState: ObservableObject {
             oralArmCount: oralArmCount,
             oralArmNodesPer: oralArmNodesPer,
             tentacleAngles: angles,
+            originalTentacleAnchorX: originalAnchors,
             oralArmAnchorX: armAnchors,
             colorIndex: Int.random(in: 0...7),
             visualDepth: visualDepth,
