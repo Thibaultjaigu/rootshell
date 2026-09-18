@@ -187,6 +187,7 @@ struct MainView: View {
     /// sidebar. Enabled by default so the content area reads as one canvas.
     @Setting(Settings.Shaders.effectIncludesPinnedSidebar)
     var backgroundEffectIncludesPinnedSidebar
+    @Setting(Settings.Shaders.sidebarEffectId) var backgroundSidebarEffectID
 
     // SSH settings
     @Setting(Settings.Connections.healthMonitoring) var sshHealthMonitoringEnabled
