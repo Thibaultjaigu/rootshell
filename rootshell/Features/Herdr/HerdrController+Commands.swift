@@ -355,6 +355,35 @@ extension HerdrController {
         runManagement { [self] in try await renameManagedTab(tabId, label: label) }
     }
 
+    func requestEqualizeSplits(_ tab: TabModel) {
+        guard let tabID = tab.herdrTabId, tabs[tabID] === tab,
+              isActive, !didEnd, !management.isBusy else { return }
+        runManagement { [self] in
+            guard tabs[tabID] === tab else { return }
+            let original = try await managementRequest(
+                "layout.export", HerdrControl.TabTarget(tab_id: tabID),
+                as: HerdrControl.LayoutDescriptionResult.self
+            ).layout
+            guard original.tab_id == tabID else {
+                throw HerdrChannelError.malformed("herdr returned a layout for another tab")
+            }
+            for params in original.root.equalizationRequests(tabID: tabID) {
+                guard tabs[tabID] === tab else { return }
+                let updated = try await managementRequest(
+                    "layout.set_split_ratio", params, as: HerdrControl.LayoutDescriptionResult.self
+                ).layout
+                // A concurrent split/close/move invalidates the remaining paths.
+                // Stop and let performManagement refresh authoritative geometry.
+                guard updated.hasSameTopology(as: original) else {
+                    throw HerdrChannelError.remote(
+                        code: "layout_changed",
+                        message: String(localized: "The herdr layout changed while equalizing. Try again.")
+                    )
+                }
+            }
+        }
+    }
+
     func requestToggleZoom(_ view: Ghostty.TerminalView) {
         guard let binding = view.herdrPaneBinding else { return }
         if mode == .legacy {
