@@ -44,7 +44,7 @@ struct EffectSettingsView: View {
     @State private var selectedPhotosVideoItem: PhotosPickerItem?
 
     // Built-in effect IDs (non-video)
-    private let builtInEffectIds = ["aurora", "solarGraph", "fireflies", "butterflies", "jellyfish", "photoBackground"]
+    private let builtInEffectIds = ["aquarium", "aurora", "solarGraph", "fireflies", "butterflies", "jellyfish", "photoBackground"]
 
     /// Built-in effects only (not video backgrounds)
     private var builtInEffects: [AnyTerminalEffect] {
@@ -603,6 +603,16 @@ struct EffectSettingsView: View {
                     JellyfishSettingsSection(effect: jellyfishEffect)
                 }
 
+                // Aquarium-specific settings
+                if activeEffect.id == "aquarium",
+                   let aquariumEffect = activeEffect.asEffect(AquariumEffect.self) {
+                    AquariumSettingsSection(effect: aquariumEffect) {
+                        aquariumEffect.resetToDefaults()
+                        localIntensity = aquariumEffect.intensity
+                        localSpeed = aquariumEffect.speed
+                    }
+                }
+
                 // Aurora-specific settings
                 if activeEffect.id == "aurora",
                    let auroraEffect = activeEffect.asEffect(AuroraEffect.self) {
@@ -627,10 +637,9 @@ struct EffectSettingsView: View {
                             // Jellyfish visits are rare and slow, so the
                             // preview also uses a fast-spawning view
                             JellyfishView(effect: jellyfishEffect, previewMode: true)
-                        } else if activeEffect.id == "aurora" {
-                            // The aurora shader's light-theme output is
-                            // white-based and only reads correctly under the
-                            // same blend mode MainView applies.
+                        } else if activeEffect.id == "aurora" || activeEffect.id == "aquarium" {
+                            // These shaders' light-theme output is white-based
+                            // and needs the same blend mode MainView applies.
                             activeEffect.createEffectView()
                                 .blendMode(effectManager.isLightTheme ? .multiply : .plusLighter)
                         } else {
