@@ -58,15 +58,9 @@ extension Ghostty.TerminalView {
             return view.subviews.contains(where: containsVisibleEmojiSearch)
         }
 
-        var windows = scene.windows
-        // UIKit's auxiliary text-effects window may only be in the legacy
-        // inventory. Restrict it to this scene so other windows cannot divert
-        // this terminal's keys. Never retain the result across events.
-        for candidate in UIApplication.shared.windows
-            where candidate.windowScene === scene && !windows.contains(where: { $0 === candidate }) {
-            windows.append(candidate)
-        }
-        return windows.contains { candidate in
+        // Inspect this terminal's scene so another scene's emoji UI cannot
+        // divert its keys. Never retain the window inventory across events.
+        return scene.windows.contains { candidate in
             candidate !== hostWindow
                 && candidate.windowLevel > hostWindow.windowLevel
                 && containsVisibleEmojiSearch(candidate)
