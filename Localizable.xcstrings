@@ -607211,6 +607211,9 @@
         }
       }
     },
+    "The herdr layout changed while equalizing. Try again." : {
+
+    },
     "The herdr on this host has no control stream, so rootshell is using server-rendered fallback mode. Install the rootshell herdr fork for full control mode." : {
       "localizations" : {
         "ar" : {

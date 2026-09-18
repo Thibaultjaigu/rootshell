@@ -266,7 +266,13 @@ extension MainView {
 
     func equalizeSplits() {
         guard terminals.indices.contains(selectedTabIndex) else { return }
-        terminals[selectedTabIndex].splitTree = terminals[selectedTabIndex].splitTree.equalize()
+        let tab = terminals[selectedTabIndex]
+        // Herdr owns these ratios; a local edit is lost on its next layout.
+        if tab.isHerdrWindow {
+            HerdrController.controller(forTab: tab)?.requestEqualizeSplits(tab)
+            return
+        }
+        tab.splitTree = tab.splitTree.equalize()
     }
 
     func toggleSplitZoom() {
