@@ -319,6 +319,13 @@ extension MainView {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
 
+            if showOpenInFolderOverlay, let model = openInFolderModel {
+                OpenInFolderHUD(isPresented: $showOpenInFolderOverlay, model: model, shortcut: openInFolderShortcut) { directory, placement in
+                    openInFolder(model.target, directory: directory, placement: placement)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+
             // Theme picker overlay
             themePickerOverlayView(isPresented: $showThemePickerOverlay)
 

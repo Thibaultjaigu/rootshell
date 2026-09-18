@@ -93,11 +93,14 @@ nonisolated enum HerdrControl {
         /// "right" or "down".
         let direction: String
         var focus = true
+        /// Start directory for the new pane's shell; nil follows herdr's policy.
+        var cwd: String? = nil
     }
 
     struct TabCreateParams: Encodable {
         let workspace_id: String
         var focus = true
+        var cwd: String? = nil
     }
 
     struct TabListParams: Encodable {
