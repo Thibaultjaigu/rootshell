@@ -697,6 +697,17 @@ struct KeyTrigger: Codable, Hashable, CustomStringConvertible, Sendable {
         self.modifiers = modifiers
     }
 
+    /// Whether UIKit received the actual chord for this binding. Recovered or
+    /// substituted modifiers can be dispatched locally, but cannot be handed
+    /// back to UIKit to drive native shortcut repeat across responder changes.
+    @MainActor
+    func matchesHardwareChord(_ hardwareKey: UIKey) -> Bool {
+        guard let code = KeyCode(uiKey: hardwareKey) else { return false }
+        let hardware = KeyTrigger(key: code, modifiers: KeybindModifiers(uiModifierFlags: hardwareKey.modifierFlags))
+        return hardware == self
+            || (hardware.modifiers.contains(.command) && hardware.shiftedSymbolEquivalent == self)
+    }
+
     /// Symbol alias for a shifted base-key trigger using the existing US shift
     /// pairs. Menu bindings can spell Shift+[ as "{". The base key has already
     /// been resolved from the layout; composed IME text is not a shortcut alias.

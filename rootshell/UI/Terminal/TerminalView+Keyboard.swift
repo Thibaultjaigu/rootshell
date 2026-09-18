@@ -554,6 +554,18 @@ extension Ghostty.TerminalView {
                 return (true, true)
             }
 
+            // Tab changes move first responder, so a per-terminal repeat timer
+            // cannot own this chord. Before shifted-symbol normalization these
+            // presses reached UIKit's repeating menu/UIKeyCommand path. Keep
+            // that ownership when the physical chord matches, including when
+            // an original shortcut wins over mod-tap. Synthetic/recovered
+            // chords still need local dispatch because UIKit never saw them.
+            if let keybind = KeybindManager.shared.keybind(for: trigger),
+               keybind.action == .previous_tab || keybind.action == .next_tab,
+               trigger.matchesHardwareChord(key) {
+                return (false, false)
+            }
+
             // Preserve UIKit's paste intent for an original bound shortcut,
             // including custom Cmd+Shift+V, when it reaches the raw press path.
             // The source modifier was forwarded, so UIKit can match the chord.

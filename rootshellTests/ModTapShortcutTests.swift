@@ -61,6 +61,41 @@ final class ModTapShortcutTests: XCTestCase {
         }
     }
 
+    func testTabSymbolBindingsRetainNativeRepeatOwnership() throws {
+        for extra: UIKeyModifierFlags in [[], .control, .alternate, [.control, .alternate]] {
+            for (usage, base, symbol, code): (UIKeyboardHIDUsage, String, String, KeyCode) in [
+                (.keyboardOpenBracket, "[", "{", .leftBrace),
+                (.keyboardCloseBracket, "]", "}", .rightBrace)
+            ] {
+                let flags = extra.union([.command, .shift])
+                let key = HardwareKey(usage, base: base, text: symbol, modifiers: flags)
+                let binding = KeyTrigger(key: code, modifiers: KeybindModifiers(uiModifierFlags: flags.subtracting(.shift)))
+                for timedHold in [false, true] {
+                    let result = try route(key, bindings: [binding: "switch_tab"], timedHold: timedHold)
+                    XCTAssertEqual(result.action, "switch_tab")
+                    XCTAssertEqual(result.modifiers, flags)
+                    // Production uses this gate to forward the press to UIKit
+                    // instead of executing a one-shot tab action locally.
+                    XCTAssertTrue(binding.matchesHardwareChord(key))
+                }
+            }
+        }
+    }
+
+    func testSyntheticTabChordCannotBeHandedToUIKit() {
+        let binding = KeyTrigger(key: .rightBrace, modifiers: .command)
+        for flags: UIKeyModifierFlags in [[], .shift, [.control, .shift], [.command, .shift, .control]] {
+            let key = HardwareKey(.keyboardCloseBracket, base: "]", text: "}", modifiers: flags)
+            XCTAssertFalse(binding.matchesHardwareChord(key))
+        }
+    }
+
+    func testExplicitTabChordAlsoRetainsNativeRepeatOwnership() {
+        let key = HardwareKey(.keyboardCloseBracket, base: "]", text: "}", modifiers: [.command, .shift])
+        let binding = KeyTrigger(key: .rightBracket, modifiers: [.command, .shift])
+        XCTAssertTrue(binding.matchesHardwareChord(key))
+    }
+
     func testEveryAdditionalModifierCombinationPreservesLetterBinding() throws {
         for extra: UIKeyModifierFlags in [
             .shift, .alternate, .control, [.shift, .alternate],
