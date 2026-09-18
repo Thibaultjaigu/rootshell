@@ -708,6 +708,13 @@ struct KeyTrigger: Codable, Hashable, CustomStringConvertible, Sendable {
             || (hardware.modifiers.contains(.command) && hardware.shiftedSymbolEquivalent == self)
     }
 
+    /// Check the registered commands, not pending sequence state: UIKit and
+    /// GameController may deliver the same physical press in either order.
+    @MainActor
+    func hasKeyCommand(in commands: [UIKeyCommand], action: Selector) -> Bool {
+        commands.contains { $0.action == action && KeyTrigger(uiKeyCommand: $0) == self }
+    }
+
     /// Symbol alias for a shifted base-key trigger using the existing US shift
     /// pairs. Menu bindings can spell Shift+[ as "{". The base key has already
     /// been resolved from the layout; composed IME text is not a shortcut alias.

@@ -371,7 +371,9 @@ extension Ghostty.TerminalView {
             && !effectiveModifiers.contains(.alternate)
         // UIKit translated characters using the physical chord. Both fallback
         // encoding and printable/repeat output must use the substituted chord.
-        lazy var effectiveCharacters = didSubstituteModifiers
+        let needsTextTranslation = didSubstituteModifiers
+            || key.modifierFlags.contains(.alphaShift) != effectiveModifiers.contains(.alphaShift)
+        lazy var effectiveCharacters = needsTextTranslation
             ? retranslatedHardwareText(for: key, modifiers: effectiveModifiers)
             : key.characters
 
@@ -822,25 +824,27 @@ extension Ghostty.TerminalView {
                 if !isSpecialKey {
                     let shifted = effectiveModifiers.contains(.shift)
                     if rightOptionActsAsAlt {
-                        keyText = printableTextForGhostty(hidUsage: key.keyCode, shift: shifted)
+                        keyText = printableTextForGhostty(hidUsage: key.keyCode, modifiers: effectiveModifiers)
                         if shifted {
                             consumed.insert(.shift)
                         }
-                    } else if shifted {
-                        // Shift held: charsIM may return layout-correct base with Shift dropped.
-                        // For letters, uppercased() is layout-correct.
-                        // For non-ASCII charsIM (broken Opt+Shift), fall back to KeyCode.
+                    } else if shifted || effectiveModifiers.contains(.alphaShift)
+                        || key.modifierFlags.contains(.alphaShift) {
+                        // Use the same effective Caps Lock state for encoder
+                        // text as for modifier flags, including a repurposed
+                        // Caps Lock key whose OS toggle is still latched.
+                        #if targetEnvironment(macCatalyst)
+                        keyText = printableTextForGhostty(hidUsage: key.keyCode, modifiers: effectiveModifiers)
+                        #else
                         let charsIM = key.charactersIgnoringModifiers
                         let isAscii = !charsIM.isEmpty && charsIM.unicodeScalars.allSatisfy({ $0.value >= 0x20 && $0.value < 0x7F })
-                        if isAscii, let ch = charsIM.first, ch.isLetter {
-                            keyText = charsIM.uppercased()
-                        } else if isAscii, let ch = charsIM.first {
-                            keyText = String(Self.shiftedCharacter(ch))
-                        } else if let kc = KeyCode(hidUsage: key.keyCode),
-                                  let baseChar = kc.literalKeyInput?.first {
-                            keyText = String(Self.shiftedCharacter(baseChar))
-                        }
-                        consumed.insert(.shift)
+                        keyText = HardwareKeyboardText.printableText(
+                            modifiers: effectiveModifiers,
+                            fallbackCharacter: isAscii ? charsIM.first : KeyCode(hidUsage: key.keyCode)?.literalKeyInput?.first,
+                            translate: { _ in nil }
+                        )
+                        #endif
+                        if shifted { consumed.insert(.shift) }
                     } else {
                         // No Shift: prefer layout-aware charsIM, KeyCode fallback
                         let charsIM = key.charactersIgnoringModifiers
@@ -940,34 +944,12 @@ extension Ghostty.TerminalView {
             // Handle regular printable characters directly to bypass iOS text transformations
             // (autocapitalization, autocorrect, etc.) that occur in super.pressesBegan()
             // Skip if Command modifier is present (let UIKeyCommand handle shortcuts)
-            var characters = effectiveCharacters
+            let characters = effectiveCharacters
 
             // Apply OPTION modifier handling
             // When Option acts as Alt, the Ghostty encoder path above handles it.
             // This path only runs when Option produces characters (not Alt mode).
             if hasOption || consumedOption { didHandleOptionKey = true }
-            if !hasOption {
-                // When CapsLock is a mod-tap key, the OS toggles CapsLock at the HID level
-                // before we can intercept. Compensate by reading the actual OS CapsLock state
-                // and comparing it to what the user intends.
-                if let capsLockRule = ModTapManager.shared.activeRulesByKey[.keyboardCapsLock] {
-                    let osCapsLock = key.modifierFlags.contains(.alphaShift)
-                    // tap=none means CapsLock on tap — desired state is userWantsCapsLock.
-                    // Any other tap action means CapsLock is fully repurposed — desired is always OFF.
-                    let desiredCapsLock = capsLockRule.tapAction == .none ? userWantsCapsLock : false
-                    if osCapsLock != desiredCapsLock {
-                        let shiftHeld = effectiveModifiers.contains(.shift)
-                        // Compute target case from desired CapsLock + Shift state (XOR = Mac convention).
-                        // This is independent of what the OS reports in key.characters.
-                        let wantUppercase = desiredCapsLock != shiftHeld
-                        characters = String(characters.map { char in
-                            if wantUppercase && char.isLowercase { return Character(char.uppercased()) }
-                            if !wantUppercase && char.isUppercase { return Character(char.lowercased()) }
-                            return char
-                        })
-                    }
-                }
-            }
 
             if let data = characters.data(using: .utf8) {
                 // Notify that input was received (for scroll-to-bottom behavior)
@@ -992,10 +974,8 @@ extension Ghostty.TerminalView {
             super.pressesEnded(presses, with: event)
             return
         }
-        if let sourceKey = modTapInterceptor.state?.sourceKey,
-           presses.contains(where: { $0.key.map { $0.keyCode != sourceKey } ?? false }) {
-            modTapInterceptor.noteChordUse()
-        }
+        // A non-source release may belong to a key pressed before mod-tap.
+        // Only key-down or an actual command dispatch proves chord use.
         // Reset OPTION key flag on key release
         didHandleOptionKey = false
 
@@ -1007,6 +987,7 @@ extension Ghostty.TerminalView {
             }
 
             guard let key = press.key else { continue }
+            inputController.controlCharacterPresses.removeValue(forKey: key.keyCode)
             // A translated Cmd+Period press can be tracked as Escape by the
             // overlay handlers but released at the layout's Period position.
             if keysConsumedByOverlayAction.contains(.keyboardEscape),
@@ -1071,6 +1052,7 @@ extension Ghostty.TerminalView {
         heldControlSide = .none
         heldOptionSide = .none
         inputController.heldModifierKeys.removeAll()
+        inputController.controlCharacterPresses.removeAll()
         heldHardwareModifiers = .none
         isGCKeyboardModifierStateTrusted = false
 
@@ -1317,7 +1299,16 @@ extension Ghostty.TerminalView {
             normalized.remove(.control)
         }
 
-        return normalized
+        return effectiveCapsLockModifiers(normalized)
+    }
+
+    /// Caps Lock used as a mod-tap source still toggles at the OS level. All
+    /// text, Ghostty events and held mouse flags must use the intended state.
+    func effectiveCapsLockModifiers(_ modifiers: UIKeyModifierFlags) -> UIKeyModifierFlags {
+        let desiredCapsLock = ModTapManager.shared.activeRulesByKey[.keyboardCapsLock].map {
+            $0.tapAction == .none ? userWantsCapsLock : false
+        }
+        return HardwareKeyboardModifiers.applyingCapsLock(desiredCapsLock, to: modifiers)
     }
 
     /// iPadOS can strip the Command modifier from certain reserved shortcuts
@@ -1526,20 +1517,48 @@ extension Ghostty.TerminalView {
                     ?? KeyCode(hidUsage: hidUsage) else { return nil }
             return normalizedBindingTrigger(KeyTrigger(key: key, modifiers: KeybindModifiers(uiModifierFlags: modifiers)))
         }
-        let originalIsBound = trigger(for: hardware).map(keybindClaimsTrigger) == true
+        let originalTrigger = trigger(for: hardware)
+        let originalIsBound = originalTrigger.map(keybindClaimsTrigger) == true
+        let manager = KeybindManager.shared
+        let originalControlCharacter = originalTrigger.flatMap { manager.keybind(for: $0)?.action.controlCharacterByte }
+        // Direct control actions have no UIKeyCommand, but a sequence sharing
+        // this prefix can generate one. That command owns both deliveries of
+        // the physical chord; GC must not also advance the sequence, even if
+        // UIKit has already processed its delivery and changed pending state.
+        if let originalTrigger, originalControlCharacter != nil {
+            if originalTrigger.hasKeyCommand(
+                in: keyCommands ?? [], action: #selector(handleKeybindCommand(_:))
+            ) {
+                return nil
+            }
+            // Prefixes without a registered command remain owned by GC.
+            let (handled, keybind) = KeySequenceTracker.shared.consume(owner: self, trigger: originalTrigger)
+            if let keybind {
+                didHandleOptionKey = true
+                executeKeybindAction(keybind.action, parameter: keybind.actionParameter)
+                return nil
+            }
+            if handled {
+                didHandleOptionKey = true
+                return nil
+            }
+        }
         guard let chord = ModifierPrintableChord(
             hardware: hardware,
             state: modTapInterceptor.state,
             originalShortcutIsBound: originalIsBound,
             heldKeys: inputController.heldModifierKeys.union(heldModifierKeys),
-            optionActsAsAlt: shouldOptionActAsAlt(virtualModifier: virtualModTapModifier, optionInEvent: true)
+            optionActsAsAlt: shouldOptionActAsAlt(virtualModifier: virtualModTapModifier, optionInEvent: true),
+            originalControlCharacter: originalControlCharacter,
+            effectiveControlCharacter: { modifiers in
+                trigger(for: modifiers).flatMap { manager.keybind(for: $0)?.action.controlCharacterByte }
+            }
         ) else { return nil }
 
         // UIKit cannot match a shortcut introduced by substitution. Dispatch
-        // those here; ordinary control characters keep the encoder/repeat path.
+        // those here; direct control characters keep the byte/repeat path.
         if chord.modifiers != hardware, let effectiveTrigger = trigger(for: chord.modifiers),
            keybindClaimsTrigger(effectiveTrigger) {
-            let manager = KeybindManager.shared
             let isControlCharacter = manager.keybind(for: effectiveTrigger)?.action.isControlCharacter == true
             if !isControlCharacter || manager.isSequencePrefix(effectiveTrigger)
                 || KeySequenceTracker.shared.isAwaitingSecondKey {
@@ -1549,6 +1568,22 @@ extension Ghostty.TerminalView {
             }
         }
         return chord
+    }
+
+    @discardableResult
+    func sendCatalystModifierPrintableChord(
+        _ chord: ModifierPrintableChord, hidUsage: UIKeyboardHIDUsage, action: Ghostty.Input.Action
+    ) -> Bool {
+        if let byte = chord.controlCharacter {
+            if action != .release {
+                didHandleOptionKey = true
+                sendUserInput(Data([byte]))
+            }
+            return true
+        }
+        let sent = sendCatalystPrintableKeyViaGhostty(hidUsage: hidUsage, action: action, modifiers: chord.modifiers)
+        if sent && action != .release { didHandleOptionKey = true }
+        return sent
     }
 
     /// Whether the current printable Catalyst key can be encoded through Ghostty.
@@ -1567,6 +1602,7 @@ extension Ghostty.TerminalView {
         modifiers: UIKeyModifierFlags,
         fallbackCharacter: Character? = nil
     ) -> Bool {
+        let modifiers = effectiveCapsLockModifiers(modifiers)
         var mods = Ghostty.Input.Mods.none
         if modifiers.contains(.control) { mods.insert(.ctrl) }
         if modifiers.contains(.shift) { mods.insert(.shift) }
@@ -1631,7 +1667,10 @@ extension Ghostty.TerminalView {
         commitKoreanCompositionIfNeeded(external: true)
         guard let input = command.input, let char = input.first else { return }
 
-        let modifiers = command.modifierFlags
+        // UIKeyCommand carries its declared chord, not the live toggle state.
+        let modifiers = effectiveCapsLockModifiers(HardwareKeyboardModifiers.applyingCapsLock(
+            KeyboardTracker.isCapsLockActive, to: command.modifierFlags
+        ))
 
         // When Shift is also held, route through Ghostty's encoder for correct
         // CSI u / Kitty protocol encoding (Ctrl+Shift is distinct from Ctrl).

@@ -3999,6 +3999,16 @@ extension Ghostty {
                 didHandleOptionKey = false
                 return
             }
+            #if targetEnvironment(macCatalyst)
+            // Native text repeat can have a different cadence from our timer.
+            // A held control-action binding owns every delivery, even when
+            // Option normally composes characters instead of acting as Alt.
+            if heldOptionSide != .none, text.count == 1,
+               TerminalCorrectionContext.isPrintable(text),
+               !inputController.controlCharacterPresses.isEmpty {
+                return
+            }
+            #endif
 
             // If processKeyPress already handled a session picker digit key, skip insertText.
             if didHandleSessionPickerKey {

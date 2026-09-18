@@ -56,7 +56,7 @@ struct ModTapState {
     }
 
     /// Caps Lock is deliberately excluded: it is a toggle, with separate
-    /// compensation in the terminal's text path, rather than a held modifier.
+    /// compensation in the terminal input path, rather than a held modifier.
     static func modifierFlag(for key: UIKeyboardHIDUsage) -> UIKeyModifierFlags? {
         switch key {
         case .keyboardLeftGUI, .keyboardRightGUI: return .command
@@ -72,21 +72,28 @@ struct ModTapState {
 /// A nil result leaves the physical chord to UIKit (a binding or Option text).
 struct ModifierPrintableChord {
     let modifiers: UIKeyModifierFlags
+    /// Explicit control actions send their configured byte, not the original
+    /// Alt chord or the control byte associated with the physical letter.
+    let controlCharacter: UInt8?
 
     init?(
         hardware: UIKeyModifierFlags,
         state: ModTapState?,
         originalShortcutIsBound: Bool,
         heldKeys: Set<UIKeyboardHIDUsage>,
-        optionActsAsAlt: Bool
+        optionActsAsAlt: Bool,
+        originalControlCharacter: UInt8? = nil,
+        effectiveControlCharacter: (UIKeyModifierFlags) -> UInt8? = { _ in nil }
     ) {
-        guard !originalShortcutIsBound else { return nil }
+        guard !originalShortcutIsBound || originalControlCharacter != nil else { return nil }
         let effective = state?.modifiers(
-            hardware: hardware, originalShortcutIsBound: false, heldKeys: heldKeys
+            hardware: hardware, originalShortcutIsBound: originalShortcutIsBound, heldKeys: heldKeys
         ) ?? hardware
+        let controlCharacter = originalShortcutIsBound ? originalControlCharacter : effectiveControlCharacter(effective)
         // Consuming Option must also bypass its composed UIKit text when
         // Option-as-Alt is off. Retained physical Option keeps its normal policy.
-        guard !effective.contains(.alternate) || optionActsAsAlt else { return nil }
+        guard controlCharacter != nil || !effective.contains(.alternate) || optionActsAsAlt else { return nil }
         modifiers = effective
+        self.controlCharacter = controlCharacter
     }
 }

@@ -43,6 +43,10 @@ final class TerminalInputController {
     /// preserve a second modifier key when mod-tap substitutes the first.
     var heldModifierKeys: Set<UIKeyboardHIDUsage> = []
 
+    /// GCKeyboard bindings that send raw control bytes have no Ghostty key
+    /// press to release. Track them separately for repeat and focus cleanup.
+    var controlCharacterPresses: [UIKeyboardHIDUsage: UInt8] = [:]
+
     /// Physical Control-key side tracking for AltGr normalization and right-Control reporting.
     var heldControlSide: Ghostty.HeldControlSide = .none
 

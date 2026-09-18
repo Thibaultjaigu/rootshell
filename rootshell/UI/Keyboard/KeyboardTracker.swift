@@ -904,6 +904,9 @@ class KeyboardTracker {
               let terminalView = focusedTerminalView(),
               !terminalView.shouldYieldHardwareInputToEmojiUI else { return }
         stopTrackedKeyRepeat()
+        // Only the newest printable chord owns repeat/text suppression. An
+        // older control-action key may still be physically down during rollover.
+        terminalView.inputController.controlCharacterPresses.removeAll()
 
         // GCKeyCode raw values match UIKeyboardHIDUsage raw values (both are USB HID)
         guard let hidUsage = UIKeyboardHIDUsage(rawValue: Int(keyCode.rawValue)) else { return }
@@ -916,32 +919,36 @@ class KeyboardTracker {
         ) else { return }
         let keyModifiers = chord.modifiers
 
-        let sent = terminalView.sendCatalystPrintableKeyViaGhostty(
-            hidUsage: hidUsage,
-            action: .press,
-            modifiers: keyModifiers
+        let sent = terminalView.sendCatalystModifierPrintableChord(
+            chord, hidUsage: hidUsage, action: .press
         )
 
         guard sent else { return }
         terminalView.didHandleOptionKey = true
-        terminalView.specialKeyPressModifiers[hidUsage] = keyModifiers
+        if let byte = chord.controlCharacter {
+            terminalView.inputController.controlCharacterPresses[hidUsage] = byte
+        } else {
+            terminalView.specialKeyPressModifiers[hidUsage] = keyModifiers
+        }
 
         startTrackedKeyRepeat(for: keyCode, validator: { [weak terminalView] in
             guard let terminalView, terminalView.isFirstResponder,
                   UIApplication.shared.applicationState == .active,
                   !terminalView.shouldYieldHardwareInputToEmojiUI,
-                  terminalView.specialKeyPressModifiers[hidUsage] == keyModifiers,
                   let input = GCKeyboard.coalesced?.keyboardInput,
                   input.button(forKeyCode: keyCode)?.isPressed == true else { return false }
+            if let byte = chord.controlCharacter {
+                guard terminalView.inputController.controlCharacterPresses[hidUsage] == byte else { return false }
+            } else {
+                guard terminalView.specialKeyPressModifiers[hidUsage] == keyModifiers else { return false }
+            }
 
             let held = Self.livePhysicalModifierFlags(input: input)
             return held.isSuperset(of: hardwareModifiers)
         }, action: { [weak terminalView] in
             guard let terminalView else { return }
-            _ = terminalView.sendCatalystPrintableKeyViaGhostty(
-                hidUsage: hidUsage,
-                action: .repeat,
-                modifiers: keyModifiers
+            _ = terminalView.sendCatalystModifierPrintableChord(
+                chord, hidUsage: hidUsage, action: .repeat
             )
         })
     }
@@ -954,6 +961,7 @@ class KeyboardTracker {
         guard let terminalView = focusedTerminalView() else { return }
         guard let hidUsage = UIKeyboardHIDUsage(rawValue: Int(keyCode.rawValue)) else { return }
 
+        terminalView.inputController.controlCharacterPresses.removeValue(forKey: hidUsage)
         if let pressModifiers = terminalView.specialKeyPressModifiers.removeValue(forKey: hidUsage) {
             terminalView.sendKeyViaGhostty(
                 keyCode: hidUsage, action: .release, modifiers: pressModifiers
@@ -1029,6 +1037,14 @@ class KeyboardTracker {
         return modifierFlags(for: Set(keys))
         #endif
     }
+
+    #if targetEnvironment(macCatalyst)
+    /// UIKeyCommand flags describe a binding, so toggle state must be read
+    /// from the live event flags rather than from the command declaration.
+    nonisolated static var isCapsLockActive: Bool {
+        livePhysicalModifierFlags(input: nil).contains(.alphaShift)
+    }
+    #endif
 
     @MainActor
     private func updateHardwareModifierState(keyCode: GCKeyCode, pressed: Bool) {

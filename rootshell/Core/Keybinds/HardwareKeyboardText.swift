@@ -1,5 +1,16 @@
 import UIKit
 
+enum HardwareKeyboardModifiers {
+    /// nil keeps the OS state; a mod-tap Caps Lock rule supplies the user's
+    /// intended toggle state instead of the Caps Lock bit latched by the OS.
+    static func applyingCapsLock(_ capsLock: Bool?, to modifiers: UIKeyModifierFlags) -> UIKeyModifierFlags {
+        guard let capsLock else { return modifiers }
+        var result = modifiers
+        if capsLock { result.insert(.alphaShift) } else { result.remove(.alphaShift) }
+        return result
+    }
+}
+
 /// Reconstructs text when a hardware chord's modifiers have been substituted.
 /// Use UIKit's layout-resolved base text rather than the physical US key code.
 enum HardwareKeyboardText {
@@ -40,17 +51,31 @@ enum HardwareKeyboardText {
             return key.characters
         }
 
+        let changed = modifiers.symmetricDifference(key.modifierFlags).intersection(textModifiers)
+        if changed == .alphaShift {
+            // Caps-only compensation changes letter case, not the layout's
+            // symbol selection. Keep UIKit's translated symbols (e.g. German
+            // Shift+3 is §), including Option compositions and dead keys.
+            guard !key.characters.hasPrefix("UIKeyInput") else { return key.characters }
+            let uppercase = modifiers.contains(.shift) != modifiers.contains(.alphaShift)
+            return key.characters.map { character in
+                guard character.isLetter else { return String(character) }
+                return uppercase ? String(character).uppercased() : String(character).lowercased()
+            }.joined()
+        }
+
         var text = base
         // If Option still belongs to the chord, preserve its layout-specific
         // character when available. Consumed Option must start from the base
         // (e.g. å -> a -> A), never from the original composed character.
         if modifiers.contains(.alternate), key.modifierFlags.contains(.alternate),
-           !key.modifierFlags.contains(.control), !key.characters.isEmpty {
+           !key.modifierFlags.contains(.control) {
             let caseModifiers: UIKeyModifierFlags = [.shift, .alphaShift]
-            if modifiers.intersection(caseModifiers) == key.modifierFlags.intersection(caseModifiers) {
+            if !key.characters.isEmpty,
+               modifiers.intersection(caseModifiers) == key.modifierFlags.intersection(caseModifiers) {
                 return key.characters
             }
-            if key.characters.allSatisfy(\.isLetter) { text = key.characters.lowercased() }
+            if !key.characters.isEmpty, key.characters.allSatisfy(\.isLetter) { text = key.characters.lowercased() }
         }
 
         let shift = modifiers.contains(.shift)

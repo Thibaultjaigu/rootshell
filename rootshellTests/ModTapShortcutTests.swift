@@ -96,6 +96,132 @@ final class ModTapShortcutTests: XCTestCase {
         XCTAssertTrue(binding.matchesHardwareChord(key))
     }
 
+    func testRepurposedCapsLockCorrectsBothTextAndModifiers() {
+        for extra: UIKeyModifierFlags in [[], .shift, .control, [.control, .shift], .alternate] {
+            let physical = extra.union(.alphaShift)
+            let effective = HardwareKeyboardModifiers.applyingCapsLock(false, to: physical)
+            XCTAssertEqual(effective, extra)
+            let key = HardwareKey(.keyboardA, base: "a", text: "A", modifiers: physical)
+            let expected = extra.contains(.shift) ? "A" : "a"
+            XCTAssertEqual(HardwareKeyboardText.text(for: key, modifiers: effective), expected)
+            XCTAssertEqual(HardwareKeyboardText.printableText(
+                modifiers: effective, fallbackCharacter: "a", translate: {
+                    XCTAssertFalse($0.contains(.alphaShift))
+                    return nil
+                }
+            ), expected)
+        }
+    }
+
+    func testIntentionalCapsLockToggleOverridesEitherOSState() {
+        for osCapsLock in [false, true] {
+            for desiredCapsLock in [false, true] {
+                for shift in [false, true] {
+                    var physical: UIKeyModifierFlags = shift ? .shift : []
+                    if osCapsLock { physical.insert(.alphaShift) }
+                    let effective = HardwareKeyboardModifiers.applyingCapsLock(desiredCapsLock, to: physical)
+                    XCTAssertEqual(effective.contains(.alphaShift), desiredCapsLock)
+                    XCTAssertEqual(effective.contains(.shift), shift)
+                    let key = HardwareKey(.keyboardA, base: "a", text: osCapsLock != shift ? "A" : "a", modifiers: physical)
+                    XCTAssertEqual(HardwareKeyboardText.text(for: key, modifiers: effective), desiredCapsLock != shift ? "A" : "a")
+                }
+            }
+        }
+        let physical: UIKeyModifierFlags = [.command, .shift, .alphaShift]
+        XCTAssertEqual(HardwareKeyboardModifiers.applyingCapsLock(nil, to: physical), physical)
+    }
+
+    func testControlShiftCommandUsesLiveCapsStateThenModTapOverride() {
+        let command = UIKeyCommand(input: "a", modifierFlags: [.control, .shift], action: NSSelectorFromString("handleControlKey:"))
+        XCTAssertFalse(command.modifierFlags.contains(.alphaShift))
+        let live = HardwareKeyboardModifiers.applyingCapsLock(true, to: command.modifierFlags)
+        XCTAssertEqual(live, [.control, .shift, .alphaShift])
+        for (override, expected): (Bool?, String) in [(nil, "a"), (false, "A"), (true, "a")] {
+            let effective = HardwareKeyboardModifiers.applyingCapsLock(override, to: live)
+            XCTAssertEqual(HardwareKeyboardText.printableText(
+                modifiers: effective, fallbackCharacter: "a", translate: { _ in nil }
+            ), expected)
+        }
+    }
+
+    func testCapsOnlyCompensationPreservesLayoutSymbolsWithoutOption() {
+        for osCapsLock in [false, true] {
+            for (usage, base, composed, shift): (UIKeyboardHIDUsage, String, String, Bool) in [
+                (.keyboard3, "3", "§", true),
+                (.keyboard2, "2", "\"", true),
+                (.keyboard1, "&", "1", true),
+                (.keyboard1, "&", "&", false),
+                (.keyboardEqualSign, "^", "", false)
+            ] {
+                var physical: UIKeyModifierFlags = shift ? .shift : []
+                if osCapsLock { physical.insert(.alphaShift) }
+                let effective = HardwareKeyboardModifiers.applyingCapsLock(!osCapsLock, to: physical)
+                let key = HardwareKey(usage, base: base, text: composed, modifiers: physical)
+                XCTAssertEqual(HardwareKeyboardText.text(for: key, modifiers: effective), composed)
+            }
+        }
+    }
+
+    func testCapsOnlyCompensationPreservesControlBytesAndSentinels() {
+        for text in ["\u{01}", "UIKeyInputEscape"] {
+            let key = HardwareKey(.keyboardA, base: "a", text: text, modifiers: [.control, .alphaShift])
+            XCTAssertEqual(HardwareKeyboardText.text(for: key, modifiers: .control), text)
+        }
+    }
+
+    func testCapsOnlyCompensationPreservesOptionSymbolsAndDeadKeys() {
+        for osCapsLock in [false, true] {
+            for (usage, base, composed, shift): (UIKeyboardHIDUsage, String, String, Bool) in [
+                (.keyboard1, "1", "¡", false),
+                (.keyboard1, "1", "⁄", true),
+                (.keyboardEqualSign, "=", "±", true),
+                (.keyboard2, "2", "™", false),
+                (.keyboardU, "u", "", false)
+            ] {
+                var physical: UIKeyModifierFlags = .alternate
+                if shift { physical.insert(.shift) }
+                if osCapsLock { physical.insert(.alphaShift) }
+                let effective = HardwareKeyboardModifiers.applyingCapsLock(!osCapsLock, to: physical)
+                let key = HardwareKey(usage, base: base, text: composed, modifiers: physical)
+                XCTAssertEqual(HardwareKeyboardText.text(for: key, modifiers: effective), composed)
+            }
+        }
+        let letter = HardwareKey(.keyboardA, base: "a", text: "Å", modifiers: [.alternate, .alphaShift])
+        XCTAssertEqual(HardwareKeyboardText.text(for: letter, modifiers: .alternate), "å")
+    }
+
+    func testConsumedOptionStillRetranslatesSymbolFromBase() {
+        let key = HardwareKey(.keyboard1, base: "1", text: "¡", modifiers: [.alternate, .alphaShift])
+        XCTAssertEqual(HardwareKeyboardText.text(for: key, modifiers: .shift), "!")
+    }
+
+    func testSharedControlSequencePrefixHasNativeDispatchOwner() {
+        let prefix = KeyTrigger(key: .a, modifiers: .option)
+        let handler = NSSelectorFromString("handleKeybindCommand:")
+        // Generated for Option+A -> Option+A even though the direct ctrl_a
+        // action alone would not generate a command.
+        let commands = [UIKeyCommand(input: "a", modifierFlags: .alternate, action: handler)]
+        XCTAssertTrue(prefix.hasKeyCommand(in: commands, action: handler))
+        XCTAssertFalse(prefix.hasKeyCommand(in: commands, action: NSSelectorFromString("handleControlKey:")))
+        XCTAssertFalse(KeyTrigger(key: .a, modifiers: [.option, .shift]).hasKeyCommand(in: commands, action: handler))
+    }
+
+    func testControlPrefixWithoutRegisteredKeybindCommandRemainsLocal() throws {
+        let prefix = KeyTrigger(key: .a, modifiers: .option)
+        let handler = NSSelectorFromString("handleKeybindCommand:")
+        let commands = [
+            UIKeyCommand(input: "a", modifierFlags: .control, action: NSSelectorFromString("handleControlKey:")),
+            UIKeyCommand(input: "b", modifierFlags: .alternate, action: handler)
+        ]
+        XCTAssertFalse(prefix.hasKeyCommand(in: commands, action: handler))
+        XCTAssertFalse(prefix.hasKeyCommand(in: [], action: handler))
+        let chord = try XCTUnwrap(ModifierPrintableChord(
+            hardware: .alternate, state: nil, originalShortcutIsBound: true,
+            heldKeys: [.keyboardLeftAlt], optionActsAsAlt: true, originalControlCharacter: 1
+        ))
+        XCTAssertEqual(chord.controlCharacter, 1)
+    }
+
     func testEveryAdditionalModifierCombinationPreservesLetterBinding() throws {
         for extra: UIKeyModifierFlags in [
             .shift, .alternate, .control, [.shift, .alternate],

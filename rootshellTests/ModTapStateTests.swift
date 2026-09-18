@@ -6,10 +6,15 @@ final class ModTapStateTests: XCTestCase {
         ModTapState(sourceKey: .keyboardLeftGUI, holdModifier: .control, startedAt: 10, threshold: 0.2)
     }
 
-    func testCleanTapAndOtherKeyRelease() {
-        let state = commandControl()
-        XCTAssertEqual(state.resolution(onRelease: .keyboardLeftGUI), .tap)
-        XCTAssertNil(state.resolution(onRelease: .keyboardC))
+    func testOlderKeyReleaseDoesNotConsumePendingTap() {
+        for source: UIKeyboardHIDUsage in [.keyboardCapsLock, .keyboardLeftGUI] {
+            let state = ModTapState(sourceKey: source, holdModifier: .control, startedAt: 10, threshold: 0.2)
+            // C was already down when the source was pressed. Only its
+            // release is delivered while the mod-tap source is pending.
+            XCTAssertNil(state.resolution(onRelease: .keyboardC))
+            XCTAssertEqual(state.phase, .pending)
+            XCTAssertEqual(state.resolution(onRelease: source), .tap)
+        }
     }
 
     func testChordResolvesHoldOnceAndSuppressesTap() {
@@ -155,6 +160,50 @@ final class ModTapStateTests: XCTestCase {
             hardware: .alternate, state: state, originalShortcutIsBound: false,
             heldKeys: [.keyboardLeftAlt, .keyboardRightAlt], optionActsAsAlt: true
         )?.modifiers, [.alternate, .shift])
+    }
+
+    func testOriginalOptionControlActionIsHandledWithAndWithoutModTap() throws {
+        var state = ModTapState(sourceKey: .keyboardLeftAlt, holdModifier: .shift, startedAt: 0, threshold: 0.2)
+        state.useInChord()
+        for activeState in [nil, state] {
+            for optionActsAsAlt in [false, true] {
+                for extra: UIKeyModifierFlags in [[], .control, .shift, [.control, .shift]] {
+                    let hardware = extra.union(.alternate)
+                    let chord = try XCTUnwrap(ModifierPrintableChord(
+                        hardware: hardware, state: activeState, originalShortcutIsBound: true,
+                        heldKeys: [.keyboardLeftAlt], optionActsAsAlt: optionActsAsAlt,
+                        originalControlCharacter: 4,
+                        effectiveControlCharacter: { _ in XCTFail("Original binding must win"); return 1 }
+                    ))
+                    XCTAssertEqual(chord.modifiers, hardware)
+                    XCTAssertEqual(chord.controlCharacter, 4)
+                }
+            }
+        }
+    }
+
+    func testSubstitutedControlActionUsesBoundByteRatherThanPhysicalLetter() throws {
+        var state = ModTapState(sourceKey: .keyboardLeftAlt, holdModifier: .control, startedAt: 0, threshold: 0.2)
+        state.useInChord()
+        let chord = try XCTUnwrap(ModifierPrintableChord(
+            hardware: .alternate, state: state, originalShortcutIsBound: false,
+            heldKeys: [.keyboardLeftAlt], optionActsAsAlt: false,
+            effectiveControlCharacter: {
+                XCTAssertEqual($0, .control)
+                return 1 // For example, Ctrl+D explicitly rebound to ctrl_a.
+            }
+        ))
+        XCTAssertEqual(chord.controlCharacter, 1)
+        XCTAssertEqual(chord.modifiers, .control)
+    }
+
+    func testUnboundOptionChordStillUsesGhosttyEncoding() throws {
+        let chord = try XCTUnwrap(ModifierPrintableChord(
+            hardware: [.alternate, .shift], state: nil, originalShortcutIsBound: false,
+            heldKeys: [.keyboardLeftAlt], optionActsAsAlt: true
+        ))
+        XCTAssertNil(chord.controlCharacter)
+        XCTAssertEqual(chord.modifiers, [.alternate, .shift])
     }
 
     func testGCPrintableCapsLockReachesLayoutTranslationOnPressAndRepeat() throws {
