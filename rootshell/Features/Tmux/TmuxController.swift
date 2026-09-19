@@ -430,6 +430,7 @@ final class TmuxController {
     /// (id=tmux-reconcile-dedup)
     private var lastAppliedTopologyOps: [TmuxReconcileOp]?
     private var skippedDuplicateReconciles = 0
+    private var equalizingWindows: Set<Int> = []
 
     // MARK: - Recovery watchdog (always-on)
 
@@ -1290,27 +1291,34 @@ final class TmuxController {
 
     /// Apply equalization on the server; the resulting reconcile owns local geometry.
     func requestEqualizeSplits(_ tab: TabModel) {
-        guard isActive, !tab.paneMove.isPending, let windowId = tab.tmuxWindowId, windowTabs[windowId] === tab,
-              let ops = lastAppliedTopologyOps else { return }
-        for case let .setLayout(id, layout, zoomedPaneId) in ops where id == windowId {
-            guard let value = layout.equalizedLayoutString() else { return }
-            var command = "select-layout -t @\(windowId) \(TmuxControlModeParser.quote(value))"
-            // select-layout unzooms on tmux 3.6; restore the same pane if needed.
-            if let paneId = zoomedPaneId {
-                command += " ; resize-pane -Z -t %\(paneId)"
-            }
-            let equalizeCommand = command
-            Task { @MainActor [weak self] in
-                guard let self, self.isActive, self.windowTabs[windowId] === tab,
-                      self.lastAppliedTopologyOps == ops else { return }
-                do {
-                    _ = try await self.sendCommandWithReply(equalizeCommand)
-                } catch {
-                    TmuxDebugLogger.shared.event("LAYOUT", "equalize failed: \(error)")
+        guard isActive, !tab.paneMove.isPending, let windowID = tab.tmuxWindowId,
+              windowTabs[windowID] === tab, !equalizingWindows.contains(windowID),
+              let layout = appliedLayout(for: windowID), layout.paneIDs.count > 1 else { return }
+        equalizingWindows.insert(windowID)
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.equalizingWindows.remove(windowID) }
+            do {
+                try await TmuxSplitEqualizer.run(windowID: windowID, layout: layout) { command in
+                    guard self.isActive, !tab.paneMove.isPending,
+                          self.windowTabs[windowID] === tab,
+                          self.appliedLayout(for: windowID)?.hasSameTopology(as: layout) == true else {
+                        throw TmuxSplitEqualizer.Failure.layoutChanged
+                    }
+                    return try await self.sendCommandWithReply(command)
                 }
+            } catch {
+                TmuxDebugLogger.shared.event("LAYOUT", "equalize failed: \(error)")
             }
-            return
         }
+    }
+
+    private func appliedLayout(for windowID: Int) -> TmuxLayoutNode? {
+        guard let ops = lastAppliedTopologyOps else { return nil }
+        for case let .setLayout(id, layout, _) in ops where id == windowID {
+            return layout
+        }
+        return nil
     }
 
     /// Returns false when the layout could not be applied (missing tab or a
