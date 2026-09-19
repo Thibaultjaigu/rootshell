@@ -1,18 +1,79 @@
 #if !os(visionOS) && !targetEnvironment(macCatalyst)
 import UIKit
 
-/// Placement belongs to the terminal's window, and survives switching panes.
+/// Runtime state is scoped to a window, optionally partitioned by tab. Weak
+/// window keys release everything when a scene closes.
+@MainActor
+final class TerminalTouchKeyboardWindowState {
+    private static let windows = NSMapTable<UIWindow, TerminalTouchKeyboardWindowState>.weakToStrongObjects()
+    private var states = TerminalTouchKeyboardModel.StateStore<TerminalFloatingKeyboardState>()
+    weak var activeController: TerminalKeyboardAccessoryController?
+    lazy var presentation = TerminalTouchKeyboardPresentation()
+
+    func state(tabID: UUID?, perTab: Bool) -> TerminalFloatingKeyboardState {
+        states.state(tabID: tabID, perTab: perTab) { TerminalFloatingKeyboardState() }
+    }
+
+    func activate(tabID: UUID?, perTab: Bool) -> TerminalFloatingKeyboardState {
+        states.activate(tabID: tabID, perTab: perTab, make: { TerminalFloatingKeyboardState() }) {
+            previous, selected in selected.copyChoices(from: previous)
+        }
+    }
+
+    static func forWindow(_ window: UIWindow) -> TerminalTouchKeyboardWindowState {
+        if let state = windows.object(forKey: window) { return state }
+        let state = TerminalTouchKeyboardWindowState()
+        windows.setObject(state, forKey: window)
+        return state
+    }
+}
+
+/// UIKit sees the same input view/controller when focus moves between terminals.
+/// The keyboard and its effect stay mounted; only their input target changes.
+@MainActor
+final class TerminalTouchKeyboardPresentation {
+    let keyboard = TerminalTouchKeyboardView()
+    let input: TerminalTouchKeyboardInputView
+    let controller: TerminalTouchKeyboardInputController
+    weak var owner: TerminalKeyboardAccessoryController?
+    var displayedState: TerminalFloatingKeyboardState?
+    var overlay: TerminalFloatingKeyboardOverlay?
+
+    init() {
+        keyboard.setBackgroundEffectSurface(nil)
+        input = TerminalTouchKeyboardInputView(keyboard: keyboard)
+        controller = TerminalTouchKeyboardInputController(keyboardInput: input)
+    }
+
+    func dismissOverlay() {
+        overlay?.detach()
+        overlay = nil
+    }
+}
+
 @MainActor
 final class TerminalFloatingKeyboardState {
-    private static let windows = NSMapTable<UIWindow, TerminalFloatingKeyboardState>.weakToStrongObjects()
+    var backgroundEffect = TerminalKeyboardEffectSurface()
+    var nativeFloatingPosition: (origin: CGPoint, screen: UIScreen)?
+    var presentation: TerminalTouchKeyboardModel.PresentationState?
+    var temporarilyUseSystemKeyboard = false
+    var requestedWithHardware = false
     var placement = TerminalTouchKeyboardModel.Placement.docked
     var anchor = CGPoint(x: 1, y: 0.85)
 
-    static func forWindow(_ window: UIWindow) -> TerminalFloatingKeyboardState {
-        if let state = windows.object(forKey: window) { return state }
-        let state = TerminalFloatingKeyboardState()
-        windows.setObject(state, forKey: window)
-        return state
+    func copyChoices(from other: TerminalFloatingKeyboardState) {
+        guard self !== other else { return }
+        // Move the live renderer with the visible choices when changing scope.
+        // Swap ownership so separate tabs never retain the same effect surface.
+        let previousEffect = backgroundEffect
+        backgroundEffect = other.backgroundEffect
+        other.backgroundEffect = previousEffect
+        nativeFloatingPosition = other.nativeFloatingPosition
+        presentation = other.presentation
+        temporarilyUseSystemKeyboard = other.temporarilyUseSystemKeyboard
+        requestedWithHardware = other.requestedWithHardware
+        placement = other.placement
+        anchor = other.anchor
     }
 }
 
@@ -20,7 +81,7 @@ final class TerminalFloatingKeyboardState {
 /// outside it continues to reach the terminal and the app's ordinary controls.
 final class TerminalFloatingKeyboardOverlay: UIView {
     private let keyboard: TerminalTouchKeyboardView
-    private let state: TerminalFloatingKeyboardState
+    private var state: TerminalFloatingKeyboardState
     private var dragOrigin: CGRect?
     var onDock: (() -> Void)?
     var isHostActive: (() -> Bool)?
@@ -38,6 +99,13 @@ final class TerminalFloatingKeyboardOverlay: UIView {
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
+    func updateState(_ state: TerminalFloatingKeyboardState) {
+        guard self.state !== state else { return }
+        self.state = state
+        dragOrigin = nil
+        setNeedsLayout()
+    }
+
     private var available: CGRect { bounds.inset(by: safeAreaInsets).insetBy(dx: 12, dy: 12) }
 
     override func layoutSubviews() {
@@ -47,7 +115,7 @@ final class TerminalFloatingKeyboardOverlay: UIView {
         let frame = TerminalTouchKeyboardModel.floatingFrame(in: available,
             height: keyboard.intrinsicContentSize.height, anchor: state.anchor)
         if keyboard.frame.size != frame.size {
-            if keyboard.frame.width != frame.width { keyboard.cancelInteraction() }
+            if keyboard.frame.width != frame.width { keyboard.cancelInteraction(preservingModifiers: true) }
             dragOrigin = nil
         }
         keyboard.frame = frame
@@ -63,7 +131,7 @@ final class TerminalFloatingKeyboardOverlay: UIView {
 
     private func move(_ translation: CGPoint, ended: Bool, allowDock: Bool = true) {
         guard isHostActive?() == true else { return }
-        if dragOrigin == nil { dragOrigin = keyboard.frame; keyboard.cancelInteraction() }
+        if dragOrigin == nil { dragOrigin = keyboard.frame; keyboard.cancelInteraction(preservingModifiers: true) }
         guard let origin = dragOrigin else { return }
         let proposed = origin.offsetBy(dx: translation.x, dy: translation.y)
         state.anchor = TerminalTouchKeyboardModel.floatingAnchor(for: proposed, in: available)
@@ -76,7 +144,7 @@ final class TerminalFloatingKeyboardOverlay: UIView {
     }
 
     func detach() {
-        keyboard.cancelInteraction()
+        keyboard.cancelInteraction(preservingModifiers: true)
         keyboard.onFloatingDrag = nil
         keyboard.onFloatingDragCancelled = nil
         keyboard.onFloatingNudge = nil

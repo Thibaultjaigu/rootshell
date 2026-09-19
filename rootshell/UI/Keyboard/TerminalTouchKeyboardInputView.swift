@@ -5,6 +5,7 @@ import UIKit
 /// the app window. Only the ordinary content view may move between containers.
 final class TerminalTouchKeyboardInputView: UIInputView {
     private let keyboard: TerminalTouchKeyboardView
+    var isHostActive: (() -> Bool)?
     var hostSize: (() -> CGSize)?
     var shouldHideAfterDocking: (() -> Bool)?
     var onDocked: (() -> Void)?
@@ -15,6 +16,19 @@ final class TerminalTouchKeyboardInputView: UIInputView {
     private let floatingPanel = TerminalTouchKeyboardFloatingPanel()
     private var ownsFloatingDragCallbacks = false
     private var floatingPositionUpdateScheduled = false
+    private var restoredFloatingPosition: (origin: CGPoint, screen: UIScreen)?
+
+    var floatingPosition: (origin: CGPoint, screen: UIScreen)? {
+        if keyboard.usesSystemPlacement, isNativeFloating, !suppressed { floatingPanel.preservePosition() }
+        return restoredFloatingPosition ?? floatingPanel.savedPosition
+    }
+
+    func suspendFloatingPosition() { floatingPanel.detach(preservingPosition: true) }
+
+    func restoreFloatingPosition(_ position: (origin: CGPoint, screen: UIScreen)?) {
+        floatingPanel.detach()
+        restoredFloatingPosition = position
+    }
 
     init(keyboard: TerminalTouchKeyboardView) {
         self.keyboard = keyboard
@@ -38,7 +52,7 @@ final class TerminalTouchKeyboardInputView: UIInputView {
         guard suppressed != value else { return }
         suppressed = value
         if value { releaseFloatingPanel() }
-        keyboard.cancelInteraction()
+        keyboard.cancelInteraction(preservingModifiers: true)
         if keyboard.superview === self { keyboard.isHidden = value }
         updateHeight()
     }
@@ -130,10 +144,14 @@ final class TerminalTouchKeyboardInputView: UIInputView {
     }
 
     private func updateFloatingPanel() {
-        guard keyboard.usesSystemPlacement, isNativeFloating, !suppressed,
+        guard isHostActive?() != false, keyboard.usesSystemPlacement, isNativeFloating, !suppressed,
               keyboard.superview === self else {
             releaseFloatingPanel()
             return
+        }
+        if let position = restoredFloatingPosition {
+            floatingPanel.savedPosition = position
+            restoredFloatingPosition = nil
         }
         floatingPanel.update(input: self, content: keyboard)
         ownsFloatingDragCallbacks = true
@@ -145,7 +163,7 @@ final class TerminalTouchKeyboardInputView: UIInputView {
     }
 
     private func moveFloatingPanel(_ translation: CGPoint, ended: Bool) {
-        guard keyboard.usesSystemPlacement, isNativeFloating, !suppressed,
+        guard isHostActive?() != false, keyboard.usesSystemPlacement, isNativeFloating, !suppressed,
               keyboard.superview === self else { return }
         // A host may be replaced between input-root layout passes. Reacquire
         // it here too, so the handle never depends on toggling input views.
@@ -206,6 +224,17 @@ private final class TerminalTouchKeyboardFloatingPanel {
     private weak var positionScreen: UIScreen?
     private var originalMask: CALayer?
     private var dragOrigin: CGPoint?
+
+    var savedPosition: (origin: CGPoint, screen: UIScreen)? {
+        get {
+            guard let desiredOrigin, let positionScreen else { return nil }
+            return (desiredOrigin, positionScreen)
+        }
+        set {
+            desiredOrigin = newValue?.origin
+            positionScreen = newValue?.screen
+        }
+    }
 
     func preservePosition() {
         guard desiredOrigin == nil, let panel, let content, let window = panel.window,

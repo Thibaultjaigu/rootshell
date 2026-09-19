@@ -3451,6 +3451,7 @@ extension Ghostty {
             super.didMoveToWindow()
 
             if window == nil {
+                keyboardAccessoryController?.saveTouchKeyboardState()
                 keyboardAccessoryController?.dismissFloatingTouchKeyboard()
                 Ghostty.logger.warning("didMoveToWindow called but window is nil!")
                 unregisterWindowFocusObservers()
@@ -3671,6 +3672,7 @@ extension Ghostty {
             // Apply the window's hide intent before acquiring first responder
             // so inputView already returns the toolbar/empty view and the
             // keyboard never flashes on tab switch or overlay dismissal.
+            keyboardAccessoryController?.activateTouchKeyboardState()
             keyboardAccessoryController?.reconcileWithHideIntent()
 
             // Tmux focus reconciliation may reassert focus on the current
@@ -3710,6 +3712,7 @@ extension Ghostty {
                 // window rather than the one actually receiving keystrokes.
                 installSequenceTrackerTimeoutHandler()
             } else if !result {
+                keyboardAccessoryController?.saveTouchKeyboardState()
                 Ghostty.logger.info("becomeFirstResponder() FAILED on terminal \(self.uuid.uuidString.prefix(8)) - not setting Ghostty focus")
             }
 
@@ -3718,7 +3721,6 @@ extension Ghostty {
 
         @discardableResult
         override func resignFirstResponder() -> Bool {
-            keyboardAccessoryController?.cancelTouchKeyboardInteraction()
             invalidateWritingAssistance(resetDocument: true)
             #if !targetEnvironment(macCatalyst)
             if shouldPreserveFirstResponderForSoftwareKeyboardAppTransition() {
@@ -3743,7 +3745,10 @@ extension Ghostty {
                 keyboardToolbarCollapsed = false
             }
             Ghostty.logger.info("resignFirstResponder() called on terminal \(self.uuid.uuidString.prefix(8))")
+            keyboardAccessoryController?.saveTouchKeyboardState()
+            keyboardAccessoryController?.cancelTouchKeyboardInteraction()
             let result = super.resignFirstResponder()
+            if !result { keyboardAccessoryController?.activateTouchKeyboardState() }
             if result {
                 keyboardAccessoryController?.dismissFloatingTouchKeyboard()
                 EffectManager.shared.notifyKeyboardToolbarLayoutChanged()
