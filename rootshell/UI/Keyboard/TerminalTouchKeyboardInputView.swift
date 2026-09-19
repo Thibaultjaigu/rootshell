@@ -12,11 +12,27 @@ final class TerminalTouchKeyboardInputView: UIInputView {
     var onNativePlacementChanged: ((TerminalTouchKeyboardModel.Placement) -> Void)?
     private(set) var isNativeFloating = false
     private var suppressed = false
+    private var awaitingFloatingLayout = false
     private var heightConstraint: NSLayoutConstraint!
     private let floatingPanel = TerminalTouchKeyboardFloatingPanel()
     private var ownsFloatingDragCallbacks = false
     private var floatingPositionUpdateScheduled = false
+    private var hostingGeneration = 0
     private var restoredFloatingPosition: (origin: CGPoint, screen: UIScreen)?
+    private var floatingPositionDisplayLink: CADisplayLink?
+
+    @MainActor
+    private final class FloatingPositionObserver: NSObject {
+        weak var input: TerminalTouchKeyboardInputView?
+
+        @objc func update(_ link: CADisplayLink) {
+            guard let input else {
+                link.invalidate()
+                return
+            }
+            input.maintainFloatingPosition()
+        }
+    }
 
     var floatingPosition: (origin: CGPoint, screen: UIScreen)? {
         if keyboard.usesSystemPlacement, isNativeFloating, !suppressed { floatingPanel.preservePosition() }
@@ -28,6 +44,19 @@ final class TerminalTouchKeyboardInputView: UIInputView {
     func restoreFloatingPosition(_ position: (origin: CGPoint, screen: UIScreen)?) {
         floatingPanel.detach()
         restoredFloatingPosition = position
+    }
+
+    func setUsesSystemPlacement(_ value: Bool) {
+        guard keyboard.usesSystemPlacement != value else { return }
+        // Restore UIKit's mask and center before the content changes hosts.
+        // Keep the native anchor for a later return to the system container.
+        let position = floatingPosition
+        hostingGeneration += 1
+        awaitingFloatingLayout = false
+        releaseFloatingPanel()
+        restoredFloatingPosition = position
+        keyboard.usesSystemPlacement = value
+        setNeedsLayout()
     }
 
     init(keyboard: TerminalTouchKeyboardView) {
@@ -50,11 +79,30 @@ final class TerminalTouchKeyboardInputView: UIInputView {
 
     func setSuppressed(_ value: Bool) {
         guard suppressed != value else { return }
+        hostingGeneration += 1
         suppressed = value
+        awaitingFloatingLayout = !value && keyboard.usesSystemPlacement && isNativeFloating
         if value { releaseFloatingPanel() }
         keyboard.cancelInteraction(preservingModifiers: true)
-        if keyboard.superview === self { keyboard.isHidden = value }
+        if keyboard.superview === self { keyboard.isHidden = value || awaitingFloatingLayout }
+        updateAppearance()
         updateHeight()
+        if awaitingFloatingLayout {
+            let generation = hostingGeneration
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.hostingGeneration == generation,
+                      !KeyboardTracker.shared.isKeyboardAnimating else { return }
+                self.finishKeyboardTransition()
+            }
+        }
+    }
+
+    func finishKeyboardTransition() {
+        guard awaitingFloatingLayout else { return }
+        // A genuine system docking must still be honored once the transition
+        // finishes, even if UIKit never restores a narrow floating container.
+        awaitingFloatingLayout = false
+        setNeedsLayout()
     }
 
     func updateHeight() {
@@ -71,7 +119,7 @@ final class TerminalTouchKeyboardInputView: UIInputView {
     }
 
     private func updateAppearance() {
-        backgroundColor = keyboard.isFloating && !UIAccessibility.isReduceTransparencyEnabled
+        backgroundColor = suppressed || (keyboard.isFloating && !UIAccessibility.isReduceTransparencyEnabled)
             ? .clear : keyboard.containerBackgroundColor
         overrideUserInterfaceStyle = keyboard.overrideUserInterfaceStyle
     }
@@ -80,18 +128,28 @@ final class TerminalTouchKeyboardInputView: UIInputView {
         let size = hostSize?() ?? .zero
         // UIKit sends intermediate zero-size layouts while replacing input sets.
         // They are not a user's request to dock the floating keyboard.
-        guard !suppressed, bounds.width > 0, size.width > 0 else {
+        guard !suppressed, keyboard.superview === self, bounds.width > 0, size.width > 0 else {
             super.layoutSubviews()
             return
         }
         let floating = TerminalTouchKeyboardModel.isFloatingInput(
             width: bounds.width, hostWidth: size.width,
             isPad: traitCollection.userInterfaceIdiom == .pad)
+        if awaitingFloatingLayout && !floating {
+            // On hardware disconnect UIKit can first reuse its full-width
+            // hardware host. Do not render docked keys into that interim frame.
+            keyboard.isHidden = true
+            super.layoutSubviews()
+            return
+        }
         let docked = isNativeFloating && !floating
+        let generation = hostingGeneration
         if floating != isNativeFloating {
             isNativeFloating = floating
             DispatchQueue.main.async { [weak self] in
-                guard let self, self.isNativeFloating == floating else { return }
+                guard let self, self.hostingGeneration == generation,
+                      !self.suppressed, self.keyboard.superview === self,
+                      self.isNativeFloating == floating else { return }
                 self.onNativePlacementChanged?(floating ? .floating : .docked)
             }
         }
@@ -101,7 +159,12 @@ final class TerminalTouchKeyboardInputView: UIInputView {
             // native floating container's old frame on some iPadOS versions.
             setSuppressed(true)
             keyboard.setFloating(false)
-            DispatchQueue.main.async { [weak self] in self?.onDocked?() }
+            let dockingGeneration = hostingGeneration
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.hostingGeneration == dockingGeneration,
+                      !self.isNativeFloating, self.keyboard.superview === self else { return }
+                self.onDocked?()
+            }
             super.layoutSubviews()
             return
         }
@@ -115,6 +178,7 @@ final class TerminalTouchKeyboardInputView: UIInputView {
         updateHeight()
         super.layoutSubviews()
         updateFloatingPanel()
+        keyboard.isHidden = false
         // Our layout can run before UIKit finishes positioning the containing
         // host. Apply the anchor again after that enclosing layout has returned.
         if keyboard.usesSystemPlacement, isNativeFloating, !floatingPositionUpdateScheduled {
@@ -122,7 +186,7 @@ final class TerminalTouchKeyboardInputView: UIInputView {
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 self.floatingPositionUpdateScheduled = false
-                guard self.window != nil else { return }
+                guard self.hostingGeneration == generation, self.window != nil else { return }
                 self.updateFloatingPanel()
             }
         }
@@ -130,17 +194,24 @@ final class TerminalTouchKeyboardInputView: UIInputView {
 
     override func willMove(toWindow newWindow: UIWindow?) {
         if newWindow !== window {
+            hostingGeneration += 1
             if keyboard.usesSystemPlacement, isNativeFloating, !suppressed {
-                // UIKit may detach/reparent the input root while resizing. The
-                // old host must be restored, but the screen anchor must survive.
+                // Capture before reparenting, but do not reset the old host's
+                // center while our content is still visibly attached to it.
                 floatingPanel.preservePosition()
-                floatingPanel.detach(preservingPosition: true)
                 floatingPanel.cancelDrag()
-            } else {
-                releaseFloatingPanel()
             }
         }
         super.willMove(toWindow: newWindow)
+    }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        if window == nil {
+            releaseFloatingPanel()
+        } else {
+            setNeedsLayout()
+        }
     }
 
     private func updateFloatingPanel() {
@@ -154,6 +225,13 @@ final class TerminalTouchKeyboardInputView: UIInputView {
             restoredFloatingPosition = nil
         }
         floatingPanel.update(input: self, content: keyboard)
+        if window != nil, floatingPositionDisplayLink == nil {
+            let observer = FloatingPositionObserver()
+            observer.input = self
+            let link = CADisplayLink(target: observer, selector: #selector(FloatingPositionObserver.update(_:)))
+            floatingPositionDisplayLink = link
+            link.add(to: .main, forMode: .common)
+        }
         ownsFloatingDragCallbacks = true
         keyboard.onFloatingDrag = { [weak self] translation, ended in
             self?.moveFloatingPanel(translation, ended: ended)
@@ -172,7 +250,11 @@ final class TerminalTouchKeyboardInputView: UIInputView {
     }
 
     private func releaseFloatingPanel() {
-        floatingPanel.detach()
+        floatingPositionDisplayLink?.invalidate()
+        floatingPositionDisplayLink = nil
+        // UIKit can briefly remove or redock the input root during a responder
+        // handoff. That is not a request to forget the floating screen anchor.
+        floatingPanel.detach(preservingPosition: true)
         guard ownsFloatingDragCallbacks else { return }
         ownsFloatingDragCallbacks = false
         keyboard.onFloatingDrag = nil
@@ -180,10 +262,21 @@ final class TerminalTouchKeyboardInputView: UIInputView {
         keyboard.onFloatingNudge = nil
     }
 
+    private func maintainFloatingPosition() {
+        guard window != nil, keyboard.usesSystemPlacement, isNativeFloating,
+              !suppressed, keyboard.superview === self else { return }
+        // UIKit can move an ancestor without laying out this input view again.
+        // Follow those changes through the whole responder transition, rather
+        // than correcting only once on the next main-queue turn.
+        floatingPanel.maintainPosition(input: self, content: keyboard)
+    }
+
     func attachKeyboard() {
         guard keyboard.superview !== self else { return }
-        keyboard.setFloating(false)
-        keyboard.isHidden = suppressed
+        // The system container can remain floating while our content lives in
+        // the app overlay. Do not request docked height when reattaching to it.
+        keyboard.setFloating(isNativeFloating)
+        keyboard.isHidden = suppressed || awaitingFloatingLayout
         keyboard.translatesAutoresizingMaskIntoConstraints = false
         addSubview(keyboard)
         NSLayoutConstraint.activate([
@@ -282,6 +375,19 @@ private final class TerminalTouchKeyboardFloatingPanel {
         CATransaction.commit()
         // Leave initial UIKit presentation alone, then retain the position
         // captured by a drag or a content-height change.
+        if let desiredOrigin { position(at: desiredOrigin) }
+    }
+
+    func maintainPosition(input: UIView, content: UIView) {
+        guard let window = input.window else { return }
+        guard let panel, panel.window === window, input.isDescendant(of: panel),
+              positionScreen == nil || positionScreen === window.screen,
+              self.content === content else {
+            update(input: input, content: content)
+            return
+        }
+        // Geometry-only work: do not rebuild the mask or keyboard effect on
+        // every frame. Normal input layout continues to own their sizing.
         if let desiredOrigin { position(at: desiredOrigin) }
     }
 
