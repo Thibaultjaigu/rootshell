@@ -3451,8 +3451,8 @@ extension Ghostty {
             super.didMoveToWindow()
 
             if window == nil {
-                keyboardAccessoryController?.saveTouchKeyboardState()
                 keyboardAccessoryController?.dismissFloatingTouchKeyboard()
+                keyboardAccessoryController?.releaseTouchKeyboardState()
                 Ghostty.logger.warning("didMoveToWindow called but window is nil!")
                 unregisterWindowFocusObservers()
                 applyGhosttyFocus(false)
@@ -3712,7 +3712,7 @@ extension Ghostty {
                 // window rather than the one actually receiving keystrokes.
                 installSequenceTrackerTimeoutHandler()
             } else if !result {
-                keyboardAccessoryController?.saveTouchKeyboardState()
+                keyboardAccessoryController?.abandonTouchKeyboardActivation()
                 Ghostty.logger.info("becomeFirstResponder() FAILED on terminal \(self.uuid.uuidString.prefix(8)) - not setting Ghostty focus")
             }
 
@@ -3745,12 +3745,13 @@ extension Ghostty {
                 keyboardToolbarCollapsed = false
             }
             Ghostty.logger.info("resignFirstResponder() called on terminal \(self.uuid.uuidString.prefix(8))")
-            keyboardAccessoryController?.saveTouchKeyboardState()
             keyboardAccessoryController?.cancelTouchKeyboardInteraction()
             let result = super.resignFirstResponder()
-            if !result { keyboardAccessoryController?.activateTouchKeyboardState() }
             if result {
-                keyboardAccessoryController?.dismissFloatingTouchKeyboard()
+                // Ownership ends only on a real focus loss. An incoming
+                // terminal has usually claimed the keyboard already, in which
+                // case this is a no-op and its floating card survives.
+                keyboardAccessoryController?.releaseTouchKeyboardState()
                 EffectManager.shared.notifyKeyboardToolbarLayoutChanged()
                 #if targetEnvironment(macCatalyst)
                 CatalystAppDelegate.noteContinuityPasteboardTargetResigned(self)

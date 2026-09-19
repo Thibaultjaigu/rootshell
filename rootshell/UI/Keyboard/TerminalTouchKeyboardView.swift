@@ -556,13 +556,20 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate, UIGesture
             let token = NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated {
                     guard let self else { return }
+                    // Activation only pauses and resumes the effect. Settings,
+                    // theme and toolbar changes each arrive through their own
+                    // notification, so no rebuild is needed on either edge.
                     if name == UIApplication.willResignActiveNotification {
-                        self.cancelInteraction()
+                        self.cancelInteraction(preservingModifiers: true)
                         self.effectsSuspended = true
                         self.updateBackgroundEffect()
                         return
                     }
-                    if name == UIApplication.didBecomeActiveNotification { self.effectsSuspended = false }
+                    if name == UIApplication.didBecomeActiveNotification {
+                        self.effectsSuspended = false
+                        self.updateBackgroundEffect()
+                        return
+                    }
                     self.refreshSettings()
                 }
             }
@@ -1003,8 +1010,11 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate, UIGesture
             cancelInteraction(preservingModifiers: true)
             removeBackgroundEffect()
         } else {
-            refreshSettings()
+            // Keys and drawers are already current; only the window-bound
+            // effect and the host's suggestions need refreshing here.
+            updateBackgroundEffect()
             updateSuggestions()
+            setNeedsLayout()
         }
     }
 
