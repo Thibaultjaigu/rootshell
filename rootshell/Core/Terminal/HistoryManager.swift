@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 /// Manages command history with persistent storage
 @MainActor

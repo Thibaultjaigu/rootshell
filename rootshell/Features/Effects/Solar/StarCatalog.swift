@@ -9,6 +9,7 @@
 import Foundation
 import CoreLocation
 import SwiftUI
+import os
 
 // MARK: - Spectral Classification
 
