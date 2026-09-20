@@ -409,7 +409,5 @@ struct AddPortForwardView: View {
 }
 
 #Preview {
-    AddPortForwardSheet { forward in
-        print("Added: \(forward.displayString)")
-    }
+    AddPortForwardSheet { _ in }
 }

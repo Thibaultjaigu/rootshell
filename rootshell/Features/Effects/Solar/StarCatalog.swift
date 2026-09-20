@@ -130,7 +130,7 @@ final class StarCatalog {
                 isLoaded = true
                 return
             } catch {
-                print("Failed to decode star catalog: \(error)")
+                Ghostty.logger.error("Failed to decode star catalog: \(error)")
             }
         }
 

@@ -186,7 +186,7 @@ class HistoryManager {
                     strongSelf.commands = loadedCommands + added
                 }
             } catch {
-                print("Failed to load history: \(error)")
+                Ghostty.logger.error("Failed to load history: \(error)")
             }
         }
     }
@@ -198,7 +198,7 @@ class HistoryManager {
             do {
                 try content.write(to: historyFilePath, atomically: true, encoding: .utf8)
             } catch {
-                print("Failed to save history: \(error)")
+                Ghostty.logger.error("Failed to save history: \(error)")
             }
         }
     }
