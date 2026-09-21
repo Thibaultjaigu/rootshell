@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		47AF04870000000000000A01 /* PaneCloseConfirmationPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 47AF04870000000000000B01 /* PaneCloseConfirmationPolicy.swift */; };
 		06402925345B9813ECE3B11E /* Debug-AppStore.xcconfig in Resources */ = {isa = PBXBuildFile; fileRef = 47511ACC2EDF598900696C18 /* Debug-AppStore.xcconfig */; };
 		06641C55E10A388BA59C6B87 /* AppIconRadicalSolarizedLight.icon in Resources */ = {isa = PBXBuildFile; fileRef = 47A1000B2F9D0BCD009B5D30 /* AppIconRadicalSolarizedLight.icon */; };
 		0668A4F421BC22AFA165E265 /* GhosttyKitStandalone in Frameworks */ = {isa = PBXBuildFile; productRef = 417549D6E2D63FC56F6548A4 /* GhosttyKitStandalone */; };
@@ -515,6 +516,7 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		47AF04870000000000000B01 /* PaneCloseConfirmationPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = rootshell/Core/Terminal/PaneCloseConfirmationPolicy.swift; sourceTree = SOURCE_ROOT; };
 		473118BF2FFC2B1500FB3C83 /* rootshellvpn.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = rootshellvpn.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		473118CB2FFC2B1600FB3C83 /* rootshellvpnTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = rootshellvpnTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		473118D52FFC2B1600FB3C83 /* rootshellvpnUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = rootshellvpnUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -1203,6 +1205,7 @@
 				47AC7E5700000000000000B6 /* rootshell/Features/Herdr/HerdrManagementModels.swift */,
 				47AC7E5700000000000000B7 /* rootshell/Features/Herdr/HerdrReplyFilter.swift */,
 				47AC7E5700000000000000B8 /* rootshell/Core/Terminal/TerminalGridReports.swift */,
+				47AF04870000000000000B01 /* PaneCloseConfirmationPolicy.swift */,
 				47AF0F1D0000000000000A01 /* rootshell/Core/Shell/InitialDirectoryCommand.swift */,
 				47AF0F1D0000000000000A02 /* rootshell/Core/Terminal/TerminalTargetKey.swift */,
 				47AF0F1D0000000000000A03 /* rootshell/Features/Tmux/TmuxCommandQuoting.swift */,
@@ -2184,6 +2187,7 @@
 				47AC7E5700000000000000A6 /* rootshell/Features/Herdr/HerdrManagementModels.swift in Sources */,
 				47AC7E5700000000000000A7 /* rootshell/Features/Herdr/HerdrReplyFilter.swift in Sources */,
 				47AC7E5700000000000000A8 /* rootshell/Core/Terminal/TerminalGridReports.swift in Sources */,
+				47AF04870000000000000A01 /* PaneCloseConfirmationPolicy.swift in Sources */,
 				47AEC0020000000000000003 /* rootshell/Core/Shell/LoginShellCommand.swift in Sources */,
 				47AF0F1D0000000000000B01 /* rootshell/Core/Shell/InitialDirectoryCommand.swift in Sources */,
 				47AF0F1D0000000000000B02 /* rootshell/Core/Terminal/TerminalTargetKey.swift in Sources */,

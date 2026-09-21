@@ -20,6 +20,13 @@ extension MainView {
 
     // MARK: - Sheet Presentation Predicates
 
+    private var pendingClosePaneExists: Bool {
+        PaneCloseConfirmationPolicy.targetExists(
+            pendingID: pendingClosePaneID,
+            livePaneIDs: terminals.flatMap { $0.splitTree.map(\.uuid) }
+        )
+    }
+
     /// Whether the pending "Ask Each Time" tab is already hidden — used to omit
     /// the Hide Tab dialog button (hiding it is a no-op). (id=tmux-tab-close-action)
     private var pendingTmuxCloseTabIsHidden: Bool {
@@ -184,7 +191,7 @@ extension MainView {
             .confirmationDialog(
                 "Close Pane?",
                 isPresented: Binding(
-                    get: { pendingClosePaneID != nil },
+                    get: { pendingClosePaneExists },
                     set: { if !$0 { pendingClosePaneID = nil } }
                 ),
                 titleVisibility: .visible
@@ -195,6 +202,11 @@ extension MainView {
                     .keyboardShortcut(.cancelAction)
             } message: {
                 Text("Closing this pane will end its current session.")
+            }
+            .onChange(of: pendingClosePaneExists) { _, exists in
+                // Server reconciliation and tab removal bypass closeSplit.
+                // Observe the live tree so those paths dismiss the dialog too.
+                if !exists { pendingClosePaneID = nil }
             }
             // "Ask Each Time" tmux tab-close action sheet. (id=tmux-tab-close-action)
             .confirmationDialog(

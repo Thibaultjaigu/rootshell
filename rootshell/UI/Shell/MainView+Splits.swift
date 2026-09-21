@@ -12,12 +12,6 @@ import os
 
 // MARK: - Split Management
 
-enum PaneCloseConfirmationPolicy {
-    static func shouldConfirm(isEnabled: Bool, paneCount: Int) -> Bool {
-        isEnabled && paneCount > 1
-    }
-}
-
 extension MainView {
 
     func handlePaneMove(tabID: UUID, source: SplitPaneView, destination: SplitPaneView, zone: PaneDropZone) {
