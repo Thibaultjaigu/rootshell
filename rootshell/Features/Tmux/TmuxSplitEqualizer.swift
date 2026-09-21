@@ -1,6 +1,7 @@
 /// Equalize existing server cells. Most layouts use tmux's native spread
-/// operation. Adjacent same-axis splits use native resize-pane with calculated
-/// leaf sizes, because equal binary nodes need not produce equal visible leaves.
+/// operation. Adjacent same-axis splits use planned native resize-pane commands
+/// when their boundaries are reachable, or a safe native spread when it can
+/// produce equal visible leaves. Unsupported plans fail before changing panes.
 /// Never import a custom layout: it assigns panes by mutable pane-list order.
 @MainActor
 enum TmuxSplitEqualizer {
@@ -47,10 +48,11 @@ enum TmuxSplitEqualizer {
         }
         let snapshotCommand = "display-message -p -t @\(windowID) '#{window_layout}|#{window_zoomed_flag}|#{pane_id}|#{pane-border-status}|#{pane-scrollbars}'"
         let original = try Snapshot(await send(snapshotCommand))
+        var requiresNativeSafety = !original.tree.hasNestedSameAxisSplit
         func validate(_ snapshot: Snapshot) throws {
             guard snapshot.tree.hasSameTopology(as: layout) else { throw Failure.layoutChanged }
             guard !snapshot.hasDecorations else { throw Failure.unsafeLayout }
-            if !original.tree.hasNestedSameAxisSplit && !snapshot.tree.permitsNativeEqualization {
+            if requiresNativeSafety && !snapshot.tree.permitsNativeEqualization {
                 throw Failure.unsafeLayout
             }
         }
@@ -69,43 +71,41 @@ enum TmuxSplitEqualizer {
         }
 
         if original.tree.hasNestedSameAxisSplit {
-            guard let equalized = original.tree.equalizedLayout(),
-                  equalized.paneIDs == original.tree.paneIDs else {
+            guard let target = original.tree.equalizationTarget() else {
                 throw Failure.unsafeLayout
             }
-            do {
-                var current = original
-                let targets = equalized.leaves
-                // Resizing one leaf can resize its neighbours or ancestors.
-                // Re-read after every command and revisit leaves until their
-                // geometry matches, bounding work if another client interferes.
-                for _ in 0..<(2 * layout.depth + 1) {
-                    for (index, target) in targets.enumerated() {
-                        for horizontal in [true, false] {
-                            try validate(current)
-                            guard current.tree.width == original.tree.width,
-                                  current.tree.height == original.tree.height else {
-                                throw Failure.layoutChanged
-                            }
-                            let leaf = current.tree.leaves[index]
-                            let size = horizontal ? target.width : target.height
-                            if (horizontal ? leaf.width : leaf.height) == size { continue }
-                            let flag = horizontal ? "-x" : "-y"
-                            _ = try await send("resize-pane -t @\(windowID).%\(paneIDs[index]) \(flag) \(size)")
-                            current = try Snapshot(await send(snapshotCommand))
+            if original.tree.leaves == target.leaves { return }
+            if let plan = original.tree.resizePlan(to: target) {
+                do {
+                    var current = original
+                    for step in plan {
+                        try validate(current)
+                        guard current.tree.width == original.tree.width,
+                              current.tree.height == original.tree.height,
+                              let leaf = current.tree.leaves.first(where: { $0.paneIDs == [step.paneID] }) else {
+                            throw Failure.layoutChanged
                         }
+                        let horizontal = step.direction == .horizontal
+                        if (horizontal ? leaf.width : leaf.height) == step.size { continue }
+                        let flag = horizontal ? "-x" : "-y"
+                        _ = try await send("resize-pane -t @\(windowID).%\(step.paneID) \(flag) \(step.size)")
+                        current = try Snapshot(await send(snapshotCommand))
                     }
                     try validate(current)
-                    if current.tree.leaves == targets {
-                        try await restoreZoom()
-                        return
-                    }
+                    guard current.tree.leaves == target.leaves else { throw Failure.didNotConverge }
+                    try await restoreZoom()
+                    return
+                } catch {
+                    try? await restoreZoom()
+                    throw error
                 }
-                throw Failure.didNotConverge
-            } catch {
-                try? await restoreZoom()
-                throw error
             }
+            // A leaf resize cannot reach every ancestor boundary. Use -E only
+            // if equal immediate children also give the desired visible sizes.
+            // Do this preflight before any mutation, including unzooming.
+            guard original.tree.nativeEqualizationProducesEqualLeaves else { throw Failure.unsafeLayout }
+            requiresNativeSafety = true
+            try validate(original)
         }
 
         do {
