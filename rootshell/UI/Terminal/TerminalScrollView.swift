@@ -3,6 +3,15 @@ import Combine
 import os
 import GhosttyKit
 
+/// A control-mode pane's displayed terminal is viewer-owned. Its scrollbar
+/// query can be briefly unavailable while the viewer is resizing or handing
+/// off state; that is not evidence that the pane lost all scrollback.
+nonisolated enum TerminalScrollbarAvailabilityPolicy {
+    static func preservesExistingDocument(isTmuxPane: Bool, hasValidSample: Bool) -> Bool {
+        isTmuxPane && hasValidSample
+    }
+}
+
 extension Ghostty {
     /// A UIScrollView wrapper for TerminalView that provides native iOS scrollback functionality.
     /// Based on the macOS SurfaceScrollView implementation.
@@ -1366,6 +1375,18 @@ extension Ghostty {
         }
 
         guard let scrollbar = terminalView.scrollbar else {
+            // `ghostty_surface_display_scrollbar` may transiently return no
+            // sample while a tmux viewer is resizing. Collapsing a previously
+            // valid document in that gap sets contentOffset to zero and makes
+            // an in-progress scroll jump to the top. Keep the last geometry
+            // until the viewer publishes its next valid sample. A fresh pane
+            // with no prior sample still takes the normal reset path below.
+            if TerminalScrollbarAvailabilityPolicy.preservesExistingDocument(
+                isTmuxPane: terminalView.isTmuxPane,
+                hasValidSample: lastObservedScrollbar != nil
+            ) {
+                return
+            }
             // Reset case (e.g., tmux tracking just ended with no native
             // scrollback to restore, or fresh terminal). Shrink the
             // document view back to the visible viewport so we don't
