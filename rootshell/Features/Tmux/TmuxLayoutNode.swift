@@ -53,6 +53,25 @@ extension TmuxLayoutNode {
             return false
         }
     }
+
+    /// Native `select-layout -E` equalizes one tmux tree node at a time. When
+    /// adjacent splits use the same axis, every binary node can already be
+    /// 50/50 while the visible leaves are not (for example 1/2 + 1/4 + 1/4).
+    /// Those layouts need one explicit, flattened server layout instead.
+    var hasNestedSameAxisSplit: Bool {
+        switch self {
+        case .pane:
+            return false
+        case let .split(direction, children, _, _, _, _):
+            return children.contains { child in
+                if case let .split(childDirection, _, _, _, _, _) = child,
+                   childDirection == direction {
+                    return true
+                }
+                return child.hasNestedSameAxisSplit
+            }
+        }
+    }
 }
 
 extension TmuxLayoutNode {
@@ -69,6 +88,95 @@ extension TmuxLayoutNode {
         case let .split(axis, children, _, _, _, _):
             let sizes = children.map { $0.minimumSize(along: direction) }
             return axis == direction ? sizes.reduce(0, +) + max(0, children.count - 1) : sizes.max() ?? 1
+        }
+    }
+
+    /// Build an equal-cell layout while flattening adjacent splits on the same
+    /// axis. Leaf traversal order is unchanged, which matters because tmux's
+    /// layout parser assigns existing panes by traversal index and ignores the
+    /// pane IDs serialized in the layout string.
+    func equalizedLayout() -> TmuxLayoutNode? {
+        equalizedLayout(width: width, height: height, x: x, y: y)
+    }
+
+    var serverLayoutString: String {
+        let body = serverLayoutBody
+        var checksum: UInt16 = 0
+        for byte in body.utf8 {
+            checksum = (checksum >> 1) | (checksum << 15)
+            checksum = checksum &+ UInt16(byte)
+        }
+        let hex = String(checksum, radix: 16)
+        return String(repeating: "0", count: 4 - hex.count) + hex + "," + body
+    }
+
+    private var serverLayoutBody: String {
+        switch self {
+        case let .pane(id, width, height, x, y):
+            return "\(width)x\(height),\(x),\(y),\(id)"
+        case let .split(direction, children, width, height, x, y):
+            let brackets = direction == .horizontal ? ("{", "}") : ("[", "]")
+            return "\(width)x\(height),\(x),\(y)" + brackets.0
+                + children.map(\.serverLayoutBody).joined(separator: ",") + brackets.1
+        }
+    }
+
+    private func flattenedChildren(along direction: Direction) -> [TmuxLayoutNode] {
+        if case let .split(axis, children, _, _, _, _) = self, axis == direction {
+            return children.flatMap { $0.flattenedChildren(along: direction) }
+        }
+        return [self]
+    }
+
+    private func equalizedLayout(width: Int, height: Int, x: Int, y: Int) -> TmuxLayoutNode? {
+        guard width >= minimumSize(along: .horizontal),
+              height >= minimumSize(along: .vertical) else { return nil }
+        switch self {
+        case let .pane(id, _, _, _, _):
+            return .pane(paneId: id, width: width, height: height, x: x, y: y)
+        case let .split(direction, _, _, _, _, _):
+            let children = flattenedChildren(along: direction)
+            guard children.count >= 2 else { return nil }
+            let horizontal = direction == .horizontal
+            var remaining = (horizontal ? width : height) - children.count + 1
+            var pending = Array(children.indices)
+            var sizes = Array(repeating: 0, count: children.count)
+
+            // Reserve recursive minima first, then share every remaining cell.
+            // This keeps perpendicular subtrees valid in cramped windows.
+            while !pending.isEmpty {
+                let share = remaining / pending.count
+                let constrained = pending.filter {
+                    children[$0].minimumSize(along: direction) > share
+                }
+                if constrained.isEmpty {
+                    for (offset, index) in pending.enumerated() {
+                        sizes[index] = share + (offset < remaining % pending.count ? 1 : 0)
+                    }
+                    break
+                }
+                for index in constrained {
+                    sizes[index] = children[index].minimumSize(along: direction)
+                    remaining -= sizes[index]
+                }
+                guard remaining >= 0 else { return nil }
+                pending.removeAll { constrained.contains($0) }
+            }
+
+            var cursor = horizontal ? x : y
+            var equalizedChildren: [TmuxLayoutNode] = []
+            for (index, child) in children.enumerated() {
+                guard let equalized = child.equalizedLayout(
+                    width: horizontal ? sizes[index] : width,
+                    height: horizontal ? height : sizes[index],
+                    x: horizontal ? cursor : x,
+                    y: horizontal ? y : cursor
+                ) else { return nil }
+                equalizedChildren.append(equalized)
+                cursor += sizes[index] + 1
+            }
+            return .split(direction: direction, children: equalizedChildren,
+                          width: width, height: height, x: x, y: y)
         }
     }
 

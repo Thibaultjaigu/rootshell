@@ -55,6 +55,45 @@ final class TmuxSplitEqualizationTests: XCTestCase {
         XCTAssertEqual(try geometry(control), expected)
     }
 
+    func testIssue475NestedSameAxisColumnsBecomeThirds() async throws {
+        let server = try Server()
+        defer { server.stop() }
+        try server.cli(["split-window", "-h", "-t", "%0"])
+        try server.cli(["split-window", "-h", "-t", "%1"])
+        for id in 0...2 { try server.cli(["split-window", "-v", "-t", "%\(id)"]) }
+        let control = try server.attach()
+        defer { control.stop() }
+
+        func column(_ top: Int, _ bottom: Int, width: Int, x: Int) -> TmuxLayoutNode {
+            .split(direction: .vertical, children: [
+                .pane(paneId: top, width: width, height: 34, x: x, y: 0),
+                .pane(paneId: bottom, width: width, height: 34, x: x, y: 35)
+            ], width: width, height: 69, x: x, y: 0)
+        }
+        let middle = column(1, 4, width: 50, x: 102)
+        let right = column(2, 5, width: 50, x: 153)
+        let nestedRight = TmuxLayoutNode.split(
+            direction: .horizontal, children: [middle, right],
+            width: 101, height: 69, x: 102, y: 0)
+        let nested = TmuxLayoutNode.split(direction: .horizontal, children: [
+            column(0, 3, width: 101, x: 0), nestedRight
+        ], width: 203, height: 69, x: 0, y: 0)
+
+        try control.command("select-layout -t @0 \(nested.serverLayoutString)")
+        XCTAssertEqual(try geometry(control), [
+            "%0 0 0 101 34", "%3 0 35 101 34",
+            "%1 102 0 50 34", "%4 102 35 50 34",
+            "%2 153 0 50 34", "%5 153 35 50 34"
+        ].sorted())
+
+        try await TmuxSplitEqualizer.run(windowID: 0, layout: nested) { try control.command($0) }
+        XCTAssertEqual(try geometry(control), [
+            "%0 0 0 67 34", "%3 0 35 67 34",
+            "%1 68 0 67 34", "%4 68 35 67 34",
+            "%2 136 0 67 34", "%5 136 35 67 34"
+        ].sorted())
+    }
+
     func testFullWidthJoinedPaneKeepsItsPosition() async throws {
         let server = try Server()
         defer { server.stop() }

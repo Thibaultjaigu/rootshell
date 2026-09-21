@@ -31,14 +31,32 @@ final class TmuxLayoutTests: XCTestCase {
         ])
     }
 
+    private var issue475NestedColumns: TmuxLayoutNode {
+        func column(_ top: Int, _ bottom: Int, width: Int, x: Int) -> TmuxLayoutNode {
+            .split(direction: .vertical, children: [
+                .pane(paneId: top, width: width, height: 38, x: x, y: 0),
+                .pane(paneId: bottom, width: width, height: 38, x: x, y: 39)
+            ], width: width, height: 77, x: x, y: 0)
+        }
+        let middle = column(10, 29, width: 51, x: 105)
+        let right = column(26, 30, width: 51, x: 157)
+        let nestedRight = TmuxLayoutNode.split(
+            direction: .horizontal, children: [middle, right],
+            width: 103, height: 77, x: 105, y: 0)
+        return .split(direction: .horizontal, children: [
+            column(24, 1, width: 104, x: 0), nestedRight
+        ], width: 208, height: 77, x: 0, y: 0)
+    }
+
     private func wireLayout(_ node: TmuxLayoutNode) -> String {
         func body(_ node: TmuxLayoutNode) -> String {
-            let prefix = "\(node.width)x\(node.height),0,0"
             switch node {
-            case let .pane(id, _, _, _, _): return "\(prefix),\(id)"
-            case let .split(axis, children, _, _, _, _):
+            case let .pane(id, width, height, x, y):
+                return "\(width)x\(height),\(x),\(y),\(id)"
+            case let .split(axis, children, width, height, x, y):
                 let brackets = axis == .horizontal ? ("{", "}") : ("[", "]")
-                return prefix + brackets.0 + children.map(body).joined(separator: ",") + brackets.1
+                return "\(width)x\(height),\(x),\(y)" + brackets.0
+                    + children.map(body).joined(separator: ",") + brackets.1
             }
         }
         let value = body(node)
@@ -69,6 +87,39 @@ final class TmuxLayoutTests: XCTestCase {
         XCTAssertNil(TmuxLayoutNode.parseServerLayout(wireLayout(split(.horizontal, [pane(0), pane(0)]))))
         let malformed = TmuxLayoutNode.split(direction: .horizontal, children: [pane(0), pane(2)], width: 2, height: 24, x: 0, y: 0)
         XCTAssertNil(TmuxLayoutNode.parseServerLayout(wireLayout(malformed)))
+    }
+
+    func testIssue475NestedColumnsFlattenToEqualLeafWidths() throws {
+        let original = issue475NestedColumns
+        XCTAssertTrue(original.hasNestedSameAxisSplit)
+        let equalized = try XCTUnwrap(original.equalizedLayout())
+        XCTAssertEqual(equalized.paneIDs, [24, 1, 10, 29, 26, 30])
+        guard case let .split(.horizontal, columns, width, height, x, y) = equalized else {
+            return XCTFail("Expected flattened horizontal root")
+        }
+        XCTAssertEqual(width, 208)
+        XCTAssertEqual(height, 77)
+        XCTAssertEqual(x, 0)
+        XCTAssertEqual(y, 0)
+        XCTAssertEqual(columns.count, 3)
+        XCTAssertEqual(columns.map(\.width), [69, 69, 68])
+        XCTAssertEqual(TmuxLayoutNode.parseServerLayout(equalized.serverLayoutString), equalized)
+    }
+
+    func testIssue475NestedColumnsUseExplicitServerLayout() async throws {
+        let original = issue475NestedColumns
+        let equalized = try XCTUnwrap(original.equalizedLayout())
+        var current = original
+        var commands: [String] = []
+        try await TmuxSplitEqualizer.run(windowID: 1, layout: original) { command in
+            commands.append(command)
+            if command.hasPrefix("display-message") { return self.reply(current) }
+            if command.hasPrefix("select-layout -t @1 ") { current = equalized }
+            return ""
+        }
+        XCTAssertEqual(current, equalized)
+        XCTAssertEqual(commands.filter { $0.hasPrefix("select-layout -t") }.count, 1)
+        XCTAssertFalse(commands.contains { $0.contains("select-layout -E") })
     }
 
     func testPerpendicularGroupRetainsMinimumWidth() async {

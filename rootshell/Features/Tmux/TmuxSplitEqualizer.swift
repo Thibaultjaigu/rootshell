@@ -1,5 +1,6 @@
-/// Equalize existing server cells instead of importing a layout string: tmux's
-/// layout parser assigns panes by index and ignores the serialized pane IDs.
+/// Equalize existing server cells. Most layouts use tmux's native spread
+/// operation. Adjacent nested splits on the same axis need an explicit layout,
+/// because every binary node can be equal while its visible leaves are not.
 @MainActor
 enum TmuxSplitEqualizer {
     enum Failure: Error {
@@ -34,8 +35,8 @@ enum TmuxSplitEqualizer {
         }
     }
 
-    /// `send` must validate that the window still has this topology before each
-    /// command. Every call contains exactly one command / control-mode reply.
+    /// `send` must validate that the window still has the same pane traversal
+    /// before each command. Every call contains exactly one command / reply.
     static func run(windowID: Int, layout: TmuxLayoutNode,
                     send: (String) async throws -> String) async throws {
         let paneIDs = layout.paneIDs
@@ -63,6 +64,23 @@ enum TmuxSplitEqualizer {
             if current.zoomedPaneID == nil {
                 _ = try await send("resize-pane -Z -t @\(windowID).%\(paneID)")
             }
+        }
+
+        if original.tree.hasNestedSameAxisSplit {
+            guard let equalized = original.tree.equalizedLayout(),
+                  equalized.paneIDs == original.tree.paneIDs else {
+                throw Failure.unsafeLayout
+            }
+            do {
+                _ = try await send("select-layout -t @\(windowID) \(TmuxControlModeParser.quote(equalized.serverLayoutString))")
+                let current = try Snapshot(await send(snapshotCommand))
+                guard current.tree == equalized else { throw Failure.layoutChanged }
+            } catch {
+                try? await restoreZoom()
+                throw error
+            }
+            try await restoreZoom()
+            return
         }
 
         do {
