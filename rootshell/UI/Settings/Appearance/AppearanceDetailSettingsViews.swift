@@ -560,10 +560,17 @@ struct WindowSettingsView: View {
                     }
                     .themedRow()
                 }
+
+                SettingDescribedToggle(
+                    Settings.Window.confirmBeforeClosingPane,
+                    title: "Confirm Before Closing Pane",
+                    description: "Ask before ⌘W, or a custom Close Tab/Split shortcut, closes one pane in a multi-pane layout."
+                )
+                .themedRow()
             } header: {
                 SettingGroupHeader("Split Panes", group: .window)
             } footer: {
-                Text("Controls the border shown around the focused pane when using split terminals.")
+                Text("Controls focused-pane appearance and safeguards for split terminal layouts.")
                     .font(.caption)
             }
 

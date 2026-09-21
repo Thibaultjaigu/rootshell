@@ -179,6 +179,23 @@ extension MainView {
                 ConnectionInfoSheet(info: info)
                     .themedSheet(themeColors: sheetTheme.themeColors, accentColor: sheetTheme.accentColor, colorScheme: sheetTheme.colorScheme)
             }
+            // Optional user-initiated close confirmation for one pane in a
+            // multi-pane tab. Automatic and final-pane closes bypass it.
+            .confirmationDialog(
+                "Close Pane?",
+                isPresented: Binding(
+                    get: { pendingClosePaneID != nil },
+                    set: { if !$0 { pendingClosePaneID = nil } }
+                ),
+                titleVisibility: .visible
+            ) {
+                Button("Close Pane", role: .destructive) { confirmPendingPaneClose() }
+                    .keyboardShortcut(.defaultAction)
+                Button("Cancel", role: .cancel) { pendingClosePaneID = nil }
+                    .keyboardShortcut(.cancelAction)
+            } message: {
+                Text("Closing this pane will end its current session.")
+            }
             // "Ask Each Time" tmux tab-close action sheet. (id=tmux-tab-close-action)
             .confirmationDialog(
                 "Close tmux Tab",

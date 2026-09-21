@@ -2126,7 +2126,10 @@ extension Ghostty.TerminalView {
         NotificationCenter.default.post(
             name: .closeSplit,
             object: self,
-            userInfo: ["windowId": windowId]
+            userInfo: [
+                "windowId": windowId,
+                GhosttyCommandRouting.userInitiatedCloseSplitKey: true,
+            ]
         )
     }
 
@@ -2362,7 +2365,11 @@ extension Ghostty.TerminalView {
 
     @objc func menuCloseSplit(_ sender: Any?) {
         noteModTapCommand(sender as? UIKeyCommand)
-        NotificationCenter.default.post(name: .closeSplit, object: self)
+        NotificationCenter.default.post(
+            name: .closeSplit,
+            object: self,
+            userInfo: [GhosttyCommandRouting.userInitiatedCloseSplitKey: true]
+        )
     }
 
     @objc func menuToggleSplitZoom(_ sender: Any?) {
@@ -2787,8 +2794,11 @@ extension Ghostty.TerminalView {
             userInfo["tabIndex"] = 8
         case .select_tab_9:
             userInfo["tabIndex"] = 9
-        case .new_tab, .new_window, .close_tab:
+        case .new_tab, .new_window:
             userInfo["windowId"] = windowId
+        case .close_tab:
+            userInfo["windowId"] = windowId
+            userInfo[GhosttyCommandRouting.userInitiatedCloseSplitKey] = true
         case .open_profile:
             if let parameter {
                 userInfo["profileID"] = parameter
