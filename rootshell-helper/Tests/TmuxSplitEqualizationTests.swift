@@ -79,7 +79,7 @@ final class TmuxSplitEqualizationTests: XCTestCase {
             column(0, 3, width: 101, x: 0), nestedRight
         ], width: 203, height: 69, x: 0, y: 0)
 
-        try control.command("select-layout -t @0 \(nested.serverLayoutString)")
+        try control.command("select-layout -t @0 '\(nested.serverLayoutString)'")
         XCTAssertEqual(try geometry(control), [
             "%0 0 0 101 34", "%3 0 35 101 34",
             "%1 102 0 50 34", "%4 102 35 50 34",
@@ -92,6 +92,43 @@ final class TmuxSplitEqualizationTests: XCTestCase {
             "%1 68 0 67 34", "%4 68 35 67 34",
             "%2 136 0 67 34", "%5 136 35 67 34"
         ].sorted())
+        let resized = try XCTUnwrap(TmuxLayoutNode.parseServerLayout(
+            control.command("display-message -p -t @0 '#{window_layout}'")))
+        XCTAssertTrue(resized.hasSameTopology(as: nested))
+        XCTAssertEqual(try control.command("display-message -p nested-replies-aligned"), "nested-replies-aligned")
+
+        // The native path must preserve zoom as well as the server topology.
+        try control.command("select-layout -t @0 '\(nested.serverLayoutString)'")
+        try control.command("resize-pane -Z -t %0")
+        try await TmuxSplitEqualizer.run(windowID: 0, layout: nested) { try control.command($0) }
+        XCTAssertEqual(try control.command("display-message -p -t @0 '#{window_zoomed_flag}:#{pane_id}'"), "1:%0")
+        try control.command("resize-pane -Z -t %0")
+        XCTAssertEqual(try geometry(control), resized.leaves.map { leaf in
+            guard case let .pane(id, w, h, x, y) = leaf else { return "" }
+            return "%\(id) \(x) \(y) \(w) \(h)"
+        }.sorted())
+
+        // Another client swaps panes after the snapshot but before a resize.
+        // Resizing by pane ID must not import the old assignment over the swap.
+        try control.command("select-layout -t @0 '\(nested.serverLayoutString)'")
+        var swappedOrder: [Int]?
+        do {
+            try await TmuxSplitEqualizer.run(windowID: 0, layout: nested) { command in
+                if command.hasPrefix("resize-pane"), swappedOrder == nil {
+                    try server.cli(["swap-pane", "-s", "%0", "-t", "%2"])
+                    let snapshot = try server.cli(["display-message", "-p", "-t", "@0", "#{window_layout}"])
+                    swappedOrder = try XCTUnwrap(TmuxLayoutNode.parseServerLayout(
+                        snapshot.trimmingCharacters(in: .whitespacesAndNewlines))).paneIDs
+                }
+                return try control.command(command)
+            }
+            XCTFail("Expected topology change after the other client's swap")
+        } catch TmuxSplitEqualizer.Failure.layoutChanged {
+            let actual = try XCTUnwrap(TmuxLayoutNode.parseServerLayout(
+                control.command("display-message -p -t @0 '#{window_layout}'")))
+            XCTAssertEqual(actual.paneIDs, try XCTUnwrap(swappedOrder))
+            XCTAssertEqual(try control.command("display-message -p race-replies-aligned"), "race-replies-aligned")
+        }
     }
 
     func testFullWidthJoinedPaneKeepsItsPosition() async throws {

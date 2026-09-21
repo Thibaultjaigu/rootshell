@@ -1302,7 +1302,7 @@ final class TmuxController {
                 try await TmuxSplitEqualizer.run(windowID: windowID, layout: layout) { command in
                     guard self.isActive, !tab.paneMove.isPending,
                           self.windowTabs[windowID] === tab,
-                          self.appliedLayout(for: windowID)?.paneIDs == layout.paneIDs else {
+                          self.appliedLayout(for: windowID)?.hasSameTopology(as: layout) == true else {
                         throw TmuxSplitEqualizer.Failure.layoutChanged
                     }
                     return try await self.sendCommandWithReply(command)

@@ -57,7 +57,7 @@ extension TmuxLayoutNode {
     /// Native `select-layout -E` equalizes one tmux tree node at a time. When
     /// adjacent splits use the same axis, every binary node can already be
     /// 50/50 while the visible leaves are not (for example 1/2 + 1/4 + 1/4).
-    /// Those layouts need one explicit, flattened server layout instead.
+    /// Those layouts need explicit target sizes for their visible leaves.
     var hasNestedSameAxisSplit: Bool {
         switch self {
         case .pane:
@@ -91,13 +91,22 @@ extension TmuxLayoutNode {
         }
     }
 
-    /// Build an equal-cell layout while flattening adjacent splits on the same
-    /// axis. Leaf traversal order is unchanged. tmux's layout parser ignores
-    /// serialized pane IDs and assigns its window pane list depth-first, so the
-    /// caller must verify that authoritative list matches this traversal before
-    /// importing the result.
+    /// Compute equal-cell target geometry by flattening adjacent same-axis
+    /// splits. This is a sizing model only: the server tree is never imported
+    /// or flattened, and native resize-pane commands retain pane assignments.
     func equalizedLayout() -> TmuxLayoutNode? {
-        equalizedLayout(width: width, height: height, x: x, y: y)
+        switch self {
+        case let .pane(_, width, height, x, y),
+             let .split(_, _, width, height, x, y):
+            return equalizedLayout(width: width, height: height, x: x, y: y)
+        }
+    }
+
+    var leaves: [TmuxLayoutNode] {
+        switch self {
+        case .pane: return [self]
+        case let .split(_, children, _, _, _, _): return children.flatMap(\.leaves)
+        }
     }
 
     var serverLayoutString: String {

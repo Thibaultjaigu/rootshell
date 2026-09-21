@@ -31,20 +31,22 @@ final class TmuxLayoutTests: XCTestCase {
         ])
     }
 
-    private var issue475NestedColumns: TmuxLayoutNode {
+    private var issue475NestedColumns: TmuxLayoutNode { nestedColumns(equalized: false) }
+
+    private func nestedColumns(equalized: Bool) -> TmuxLayoutNode {
         func column(_ top: Int, _ bottom: Int, width: Int, x: Int) -> TmuxLayoutNode {
             .split(direction: .vertical, children: [
                 .pane(paneId: top, width: width, height: 38, x: x, y: 0),
                 .pane(paneId: bottom, width: width, height: 38, x: x, y: 39)
             ], width: width, height: 77, x: x, y: 0)
         }
-        let middle = column(10, 29, width: 51, x: 105)
-        let right = column(26, 30, width: 51, x: 157)
+        let middle = column(10, 29, width: equalized ? 69 : 51, x: equalized ? 70 : 105)
+        let right = column(26, 30, width: equalized ? 68 : 51, x: equalized ? 140 : 157)
         let nestedRight = TmuxLayoutNode.split(
             direction: .horizontal, children: [middle, right],
-            width: 103, height: 77, x: 105, y: 0)
+            width: equalized ? 138 : 103, height: 77, x: equalized ? 70 : 105, y: 0)
         return .split(direction: .horizontal, children: [
-            column(24, 1, width: 104, x: 0), nestedRight
+            column(24, 1, width: equalized ? 69 : 104, x: 0), nestedRight
         ], width: 208, height: 77, x: 0, y: 0)
     }
 
@@ -68,10 +70,6 @@ final class TmuxLayoutTests: XCTestCase {
 
     private func reply(_ node: TmuxLayoutNode, zoom: Int? = nil, status: String = "off", scrollbars: String = "off") -> String {
         "\(wireLayout(node))|\(zoom == nil ? 0 : 1)|%\(zoom ?? node.paneIDs[0])|\(status)|\(scrollbars)\r\n"
-    }
-
-    private func paneListReply(_ paneIDs: [Int]) -> String {
-        paneIDs.map { "%\($0)" }.joined(separator: "\r\n") + "\r\n"
     }
 
     func testTopologyAllowsGeometryChangesButRejectsMovedOrReplacedPanes() {
@@ -110,7 +108,7 @@ final class TmuxLayoutTests: XCTestCase {
         XCTAssertEqual(TmuxLayoutNode.parseServerLayout(equalized.serverLayoutString), equalized)
     }
 
-    func testIssue475NestedColumnsUseExplicitServerLayout() async throws {
+    func testIssue475NestedColumnsResizeWithoutImportingLayout() async throws {
         let original = issue475NestedColumns
         let equalized = try XCTUnwrap(original.equalizedLayout())
         var current = original
@@ -118,33 +116,36 @@ final class TmuxLayoutTests: XCTestCase {
         try await TmuxSplitEqualizer.run(windowID: 1, layout: original) { command in
             commands.append(command)
             if command.hasPrefix("display-message") { return self.reply(current) }
-            if command.hasPrefix("list-panes") { return self.paneListReply(current.paneIDs) }
-            if command.hasPrefix("select-layout -t @1 ") { current = equalized }
+            if command.hasPrefix("resize-pane -t @1.%24 -x 69") {
+                current = self.nestedColumns(equalized: true)
+            } else { XCTFail("Unexpected command: \(command)") }
             return ""
         }
-        XCTAssertEqual(current, equalized)
-        XCTAssertEqual(commands.filter { $0.hasPrefix("select-layout -t") }.count, 1)
-        XCTAssertFalse(commands.contains { $0.contains("select-layout -E") })
+        XCTAssertEqual(current.leaves, equalized.leaves)
+        XCTAssertTrue(current.hasSameTopology(as: original))
+        XCTAssertEqual(commands.filter { $0.hasPrefix("resize-pane") }.count, 1)
+        XCTAssertFalse(commands.contains { $0.hasPrefix("select-layout") })
     }
 
-    func testExplicitServerLayoutRefusesMismatchedPaneListOrder() async {
+    func testNestedResizeStopsWhenTopologyChangesWithSamePaneOrder() async throws {
         let original = issue475NestedColumns
+        let changed = try XCTUnwrap(original.equalizedLayout())
+        var current = original
         var commands: [String] = []
         do {
             try await TmuxSplitEqualizer.run(windowID: 1, layout: original) { command in
                 commands.append(command)
-                if command.hasPrefix("display-message") { return self.reply(original) }
-                if command.hasPrefix("list-panes") {
-                    var paneIDs = original.paneIDs
-                    paneIDs.swapAt(0, 1)
-                    return self.paneListReply(paneIDs)
+                if command.hasPrefix("display-message") { return self.reply(current) }
+                if command.hasPrefix("resize-pane") {
+                    current = changed
+                    return ""
                 }
-                XCTFail("Pane-order mismatch must abort before importing a layout")
+                XCTFail("Unexpected command: \(command)")
                 return ""
             }
-            XCTFail("Expected pane-list mismatch")
+            XCTFail("Expected topology mismatch")
         } catch TmuxSplitEqualizer.Failure.layoutChanged {
-            XCTAssertEqual(commands.filter { $0.hasPrefix("list-panes") }.count, 1)
+            XCTAssertEqual(commands.filter { $0.hasPrefix("resize-pane") }.count, 1)
             XCTAssertFalse(commands.contains { $0.hasPrefix("select-layout") })
         } catch {
             XCTFail("Unexpected error: \(error)")
