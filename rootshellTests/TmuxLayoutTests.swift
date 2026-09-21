@@ -70,6 +70,10 @@ final class TmuxLayoutTests: XCTestCase {
         "\(wireLayout(node))|\(zoom == nil ? 0 : 1)|%\(zoom ?? node.paneIDs[0])|\(status)|\(scrollbars)\r\n"
     }
 
+    private func paneListReply(_ paneIDs: [Int]) -> String {
+        paneIDs.map { "%\($0)" }.joined(separator: "\r\n") + "\r\n"
+    }
+
     func testTopologyAllowsGeometryChangesButRejectsMovedOrReplacedPanes() {
         let original = pair()
         XCTAssertTrue(original.hasSameTopology(as: pair(width: 60)))
@@ -114,12 +118,37 @@ final class TmuxLayoutTests: XCTestCase {
         try await TmuxSplitEqualizer.run(windowID: 1, layout: original) { command in
             commands.append(command)
             if command.hasPrefix("display-message") { return self.reply(current) }
+            if command.hasPrefix("list-panes") { return self.paneListReply(current.paneIDs) }
             if command.hasPrefix("select-layout -t @1 ") { current = equalized }
             return ""
         }
         XCTAssertEqual(current, equalized)
         XCTAssertEqual(commands.filter { $0.hasPrefix("select-layout -t") }.count, 1)
         XCTAssertFalse(commands.contains { $0.contains("select-layout -E") })
+    }
+
+    func testExplicitServerLayoutRefusesMismatchedPaneListOrder() async {
+        let original = issue475NestedColumns
+        var commands: [String] = []
+        do {
+            try await TmuxSplitEqualizer.run(windowID: 1, layout: original) { command in
+                commands.append(command)
+                if command.hasPrefix("display-message") { return self.reply(original) }
+                if command.hasPrefix("list-panes") {
+                    var paneIDs = original.paneIDs
+                    paneIDs.swapAt(0, 1)
+                    return self.paneListReply(paneIDs)
+                }
+                XCTFail("Pane-order mismatch must abort before importing a layout")
+                return ""
+            }
+            XCTFail("Expected pane-list mismatch")
+        } catch TmuxSplitEqualizer.Failure.layoutChanged {
+            XCTAssertEqual(commands.filter { $0.hasPrefix("list-panes") }.count, 1)
+            XCTAssertFalse(commands.contains { $0.hasPrefix("select-layout") })
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
     }
 
     func testPerpendicularGroupRetainsMinimumWidth() async {

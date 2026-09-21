@@ -92,9 +92,10 @@ extension TmuxLayoutNode {
     }
 
     /// Build an equal-cell layout while flattening adjacent splits on the same
-    /// axis. Leaf traversal order is unchanged, which matters because tmux's
-    /// layout parser assigns existing panes by traversal index and ignores the
-    /// pane IDs serialized in the layout string.
+    /// axis. Leaf traversal order is unchanged. tmux's layout parser ignores
+    /// serialized pane IDs and assigns its window pane list depth-first, so the
+    /// caller must verify that authoritative list matches this traversal before
+    /// importing the result.
     func equalizedLayout() -> TmuxLayoutNode? {
         equalizedLayout(width: width, height: height, x: x, y: y)
     }

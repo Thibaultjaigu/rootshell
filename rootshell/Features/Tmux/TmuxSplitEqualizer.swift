@@ -1,6 +1,8 @@
 /// Equalize existing server cells. Most layouts use tmux's native spread
 /// operation. Adjacent nested splits on the same axis need an explicit layout,
 /// because every binary node can be equal while its visible leaves are not.
+/// Before that import, verify tmux's pane-list assignment order against the
+/// current layout traversal; custom layout strings cannot encode pane identity.
 @MainActor
 enum TmuxSplitEqualizer {
     enum Failure: Error {
@@ -45,6 +47,7 @@ enum TmuxSplitEqualizer {
             throw Failure.layoutChanged
         }
         let snapshotCommand = "display-message -p -t @\(windowID) '#{window_layout}|#{window_zoomed_flag}|#{pane_id}|#{pane-border-status}|#{pane-scrollbars}'"
+        let paneListCommand = "list-panes -t @\(windowID) -F '#{pane_id}'"
         let original = try Snapshot(await send(snapshotCommand))
         func validate(_ snapshot: Snapshot) throws {
             guard snapshot.tree.hasSameTopology(as: layout) else { throw Failure.layoutChanged }
@@ -72,6 +75,15 @@ enum TmuxSplitEqualizer {
                 throw Failure.unsafeLayout
             }
             do {
+                // layout_parse ignores leaf IDs and assigns w->panes in list
+                // order. tmux normally maintains that list in layout traversal
+                // order, but verify the server's authoritative state before an
+                // operation that could otherwise move pane contents.
+                let paneListReply = try await send(paneListCommand)
+                let serverPaneIDs = try parsePaneList(paneListReply)
+                guard serverPaneIDs == original.tree.paneIDs else {
+                    throw Failure.layoutChanged
+                }
                 _ = try await send("select-layout -t @\(windowID) \(TmuxControlModeParser.quote(equalized.serverLayoutString))")
                 let current = try Snapshot(await send(snapshotCommand))
                 guard current.tree == equalized else { throw Failure.layoutChanged }
@@ -115,5 +127,22 @@ enum TmuxSplitEqualizer {
             throw error
         }
         try await restoreZoom()
+    }
+
+    private static func parsePaneList(_ reply: String) throws -> [Int] {
+        let lines = reply.split(whereSeparator: \.isNewline)
+        guard !lines.isEmpty else { throw Failure.invalidSnapshot }
+        var paneIDs: [Int] = []
+        paneIDs.reserveCapacity(lines.count)
+        for line in lines {
+            guard line.first == "%", let paneID = Int(line.dropFirst()), paneID >= 0 else {
+                throw Failure.invalidSnapshot
+            }
+            paneIDs.append(paneID)
+        }
+        guard Set(paneIDs).count == paneIDs.count else {
+            throw Failure.invalidSnapshot
+        }
+        return paneIDs
     }
 }
