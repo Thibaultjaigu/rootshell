@@ -726,7 +726,11 @@ struct WindowSettingsView: View {
                     .themedRow()
 
                 #if os(iOS) && !targetEnvironment(macCatalyst)
-                SettingToggle(Settings.Selection.useNativeLoupe, title: "Use Native Selection Loupe")
+                SettingDescribedToggle(
+                    Settings.Selection.useNativeLoupe,
+                    title: "Use Native Selection Loupe",
+                    description: "Keep this off to tap the app's loupe with a second finger for a right click while holding the terminal. Requires Scroll Mode. See Terminal → Gestures → Gesture Help."
+                )
                     .padding(.vertical, 4)
                     .themedRow()
                 #endif
