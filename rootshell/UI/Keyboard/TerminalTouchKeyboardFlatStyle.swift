@@ -128,7 +128,7 @@ final class TerminalTouchFlatDrawerButton: TerminalTouchDrawerButton {
         lockIndicator.layer.cornerRadius = 1.5
         lockIndicator.isHidden = true
         addSubview(lockIndicator)
-        if toolbar { refreshAppearance() } else { updateConfiguration() }
+        if toolbar { refreshAppearance() } else { updateDrawerConfiguration() }
         titleLabel?.numberOfLines = 2
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
@@ -143,15 +143,15 @@ final class TerminalTouchFlatDrawerButton: TerminalTouchDrawerButton {
 
     override func updatePalette(_ palette: TerminalTouchKeyboardPalette?) {
         super.updatePalette(palette)
-        updateConfiguration()
+        updateDrawerConfiguration()
     }
 
     override func refreshAppearance() {
         super.refreshAppearance()
-        updateConfiguration()
+        updateDrawerConfiguration()
     }
 
-    private func updateConfiguration() {
+    private func updateDrawerConfiguration() {
         let key = keycap.key
         let subtitle = self.subtitle
         let palette = keycap.palette
