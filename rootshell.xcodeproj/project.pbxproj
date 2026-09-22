@@ -6860,7 +6860,7 @@
 			repositoryURL = "https://github.com/kitknox/ios_system-rootshell.git";
 			requirement = {
 				kind = exactVersion;
-				version = 0.1.0;
+				version = 0.1.1;
 			};
 		};
 		47JOE0002FA00000AABB0000 /* XCRemoteSwiftPackageReference "joe-rootshell" */ = {
@@ -6868,7 +6868,7 @@
 			repositoryURL = "https://github.com/kitknox/joe-rootshell.git";
 			requirement = {
 				kind = exactVersion;
-				version = 0.1.0;
+				version = 0.1.2;
 			};
 		};
 		47JQPKG02FB00000AABB0000 /* XCRemoteSwiftPackageReference "jq-rootshell" */ = {
