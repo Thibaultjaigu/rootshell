@@ -1,9 +1,10 @@
 #if !os(visionOS) && !targetEnvironment(macCatalyst)
 import UIKit
+import QuartzCore
 import Combine
 import SwiftUI
 
-private struct TerminalTouchKeyboardPalette {
+private struct TerminalTouchKeyboardPalette: Equatable {
     let background: UIColor
     let key: UIColor
     let pressedKey: UIColor
@@ -88,103 +89,592 @@ extension TerminalTouchKeyboardHost {
     var touchKeyboardPredictionContext: TerminalTouchKeyboardModel.PredictionSnapshot? { nil }
 }
 
+// MARK: - Key material math
+
+/// Keep the legend-readable part of the material independent of its lighting.
+/// These sRGB calculations are also exercised by the standalone validation script.
+private struct TerminalTouchKeyColor: Hashable, Sendable {
+    let red: Double
+    let green: Double
+    let blue: Double
+
+    init(red: Double, green: Double, blue: Double) {
+        func channel(_ value: Double) -> Double { value.isFinite ? min(1, max(0, value)) : 0 }
+        self.red = channel(red)
+        self.green = channel(green)
+        self.blue = channel(blue)
+    }
+
+    static let black = Self(red: 0, green: 0, blue: 0)
+    static let white = Self(red: 1, green: 1, blue: 1)
+
+    var luminance: Double {
+        func linear(_ value: Double) -> Double {
+            value <= 0.04045 ? value / 12.92 : pow((value + 0.055) / 1.055, 2.4)
+        }
+        return 0.2126 * linear(red) + 0.7152 * linear(green) + 0.0722 * linear(blue)
+    }
+
+    func contrast(with other: Self) -> Double {
+        let a = luminance, b = other.luminance
+        return (max(a, b) + 0.05) / (min(a, b) + 0.05)
+    }
+
+    func mixed(toward other: Self, amount: Double) -> Self {
+        let amount = amount.isFinite ? min(1, max(0, amount)) : 0
+        return Self(red: red + (other.red - red) * amount,
+                    green: green + (other.green - green) * amount,
+                    blue: blue + (other.blue - blue) * amount)
+    }
+
+    func readableInk(preferred: Self) -> Self {
+        if contrast(with: preferred) >= 4.5 { return preferred }
+        return contrast(with: .black) >= contrast(with: .white) ? .black : .white
+    }
+
+    /// Lighting may approach, but must not cross, the legend's contrast limit.
+    /// The renderer shades only toward black/white, so this search is monotonic.
+    func lit(toward light: Self, amount: Double, ink: Self) -> Self {
+        let amount = amount.isFinite ? min(1, max(0, amount)) : 0
+        let brighterThanInk = luminance >= ink.luminance
+        func readable(_ color: Self) -> Bool {
+            color.contrast(with: ink) >= 4.5 && (color.luminance >= ink.luminance) == brighterThanInk
+        }
+        let candidate = mixed(toward: light, amount: amount)
+        if readable(candidate) { return candidate }
+        var lower = 0.0, upper = amount
+        for _ in 0..<16 {
+            let middle = (lower + upper) / 2
+            if readable(mixed(toward: light, amount: middle)) {
+                lower = middle
+            } else {
+                upper = middle
+            }
+        }
+        return mixed(toward: light, amount: lower)
+    }
+
+    var cacheKey: String {
+        [red, green, blue].map { String($0.bitPattern, radix: 16) }.joined(separator: ":")
+    }
+}
+
+// MARK: - UIKit key artwork
+
+@MainActor
+private extension TerminalTouchKeyColor {
+    init(_ color: UIColor, traits: UITraitCollection) {
+        let resolved = color.resolvedColor(with: traits)
+        var red: CGFloat = 0, green: CGFloat = 0, blue: CGFloat = 0, alpha: CGFloat = 1
+        if !resolved.getRed(&red, green: &green, blue: &blue, alpha: &alpha) {
+            _ = resolved.getWhite(&red, alpha: &alpha)
+            green = red
+            blue = red
+        }
+        self.init(red: Double(red), green: Double(green), blue: Double(blue))
+    }
+
+    var uiColor: UIColor { UIColor(red: CGFloat(red), green: CGFloat(green), blue: CGFloat(blue), alpha: 1) }
+}
+
+/// A small, reusable texture atlas, not a running shader. Labels and symbols stay
+/// live UIKit content: glyphs are never baked into, blurred with, or scaled by it.
+@MainActor
+private enum TerminalTouchKeyArtwork {
+    enum Role: Int { case character, utility, toolbar, preview }
+
+    struct Finish: Equatable {
+        let surface: TerminalTouchKeyColor
+        let ink: TerminalTouchKeyColor
+        let role: Role
+        let pressed: Bool
+        let selected: Bool
+        let increasedContrast: Bool
+
+        init(surface: TerminalTouchKeyColor, ink: TerminalTouchKeyColor, role: Role,
+             pressed: Bool, selected: Bool, increasedContrast: Bool) {
+            self.surface = surface
+            self.ink = surface.readableInk(preferred: ink)
+            self.role = role
+            self.pressed = pressed
+            self.selected = selected
+            self.increasedContrast = increasedContrast
+        }
+
+        var padding: CGFloat { role == .preview ? 10 : 5 }
+        var cacheKey: String {
+            "\(surface.cacheKey)/\(ink.cacheKey)/\(role.rawValue)/\(pressed)/\(selected)/\(increasedContrast)"
+        }
+        func radius(in size: CGSize) -> CGFloat {
+            min(role == .toolbar || role == .preview ? 12 : 8.5, min(size.width, size.height) * 0.32)
+        }
+    }
+
+    private static let cache: NSCache<NSString, UIImage> = {
+        let cache = NSCache<NSString, UIImage>()
+        cache.countLimit = 128
+        cache.totalCostLimit = 8 * 1024 * 1024
+        return cache
+    }()
+
+    static func image(size: CGSize, scale: CGFloat, finish: Finish) -> UIImage? {
+        guard size.width.isFinite, size.height.isFinite, scale.isFinite,
+              size.width > 2, size.height > 2, scale > 0,
+              size.width * scale < 8192, size.height * scale < 8192,
+              size.width * size.height * scale * scale <= 2 * 1024 * 1024 else { return nil }
+        let width = ceil(size.width * scale), height = ceil(size.height * scale)
+        let key = "\(width)/\(height)/\(scale)/\(finish.cacheKey)" as NSString
+        if let image = cache.object(forKey: key) { return image }
+        let padding = finish.padding
+        let faceSize = CGSize(width: width / scale, height: height / scale)
+        let size = CGSize(width: faceSize.width + padding * 2, height: faceSize.height + padding * 2)
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = scale
+        format.opaque = false
+        format.preferredRange = .standard
+        let image = UIGraphicsImageRenderer(size: size, format: format).image { renderer in
+            let context = renderer.cgContext
+            let rect = CGRect(origin: CGPoint(x: padding, y: padding), size: faceSize)
+            let radius = finish.radius(in: faceSize)
+            let face = UIBezierPath(roundedRect: rect, cornerRadius: radius)
+            let dark = finish.surface.luminance < 0.35
+            let depth: CGFloat = finish.pressed ? 0.35 : (finish.role == .toolbar ? 0.7 : 1.4)
+
+            // A separate lower skirt gives travel a physical reference. Shadows
+            // are part of the cached bitmap, not per-key live blur passes.
+            context.saveGState()
+            context.setShadow(offset: CGSize(width: 0, height: finish.role == .preview ? 2 : 0.7),
+                              blur: finish.pressed ? 0.6 : (finish.role == .preview ? 5 : 1.8),
+                              color: UIColor.black.withAlphaComponent(dark ? 0.30 : 0.20).cgColor)
+            finish.surface.mixed(toward: .black, amount: dark ? 0.42 : 0.22).uiColor.setFill()
+            UIBezierPath(roundedRect: rect.offsetBy(dx: 0, dy: depth), cornerRadius: radius).fill()
+            context.restoreGState()
+
+            context.saveGState()
+            face.addClip()
+            let strength = finish.role == .utility || finish.role == .toolbar ? 0.65 : 1.0
+            let top = finish.surface.lit(toward: finish.pressed ? .black : .white,
+                                         amount: (finish.pressed ? 0.045 : 0.13) * strength, ink: finish.ink)
+            let bottom = finish.surface.lit(toward: .black,
+                                            amount: (finish.pressed ? 0.018 : 0.055) * strength, ink: finish.ink)
+            // Every stop underneath a legend retains at least 4.5:1 contrast.
+            gradient(context, colors: [top.uiColor, finish.surface.uiColor, finish.surface.uiColor, bottom.uiColor],
+                     locations: [0, 0.28, 0.64, 1], from: CGPoint(x: rect.midX, y: rect.minY),
+                     to: CGPoint(x: rect.midX, y: rect.maxY))
+            context.restoreGState()
+
+            // The two edge treatments stay outside the legend area: a dark
+            // hairline seats the cap, a directional bevel catches the light.
+            let pixel = 1 / scale
+            let rim = UIBezierPath(roundedRect: rect.insetBy(dx: pixel / 2, dy: pixel / 2),
+                                   cornerRadius: max(0, radius - pixel / 2))
+            rim.lineWidth = pixel
+            UIColor.black.withAlphaComponent(dark ? 0.35 : 0.15).setStroke()
+            rim.stroke()
+            let bevelInset = finish.increasedContrast ? 0.8 : pixel * 1.5
+            let bevel = UIBezierPath(roundedRect: rect.insetBy(dx: bevelInset, dy: bevelInset),
+                                     cornerRadius: max(0, radius - bevelInset))
+            if finish.increasedContrast {
+                finish.ink.uiColor.setStroke()
+                bevel.lineWidth = 1
+                bevel.stroke()
+            } else {
+                context.saveGState()
+                context.addPath(bevel.cgPath)
+                context.setLineWidth(pixel)
+                context.replacePathWithStrokedPath()
+                context.clip()
+                let highlight: CGFloat = finish.pressed ? 0.12 : (dark ? 0.36 : 0.90)
+                gradient(context, colors: [UIColor.white.withAlphaComponent(highlight),
+                                           UIColor.white.withAlphaComponent(0.035),
+                                           UIColor.black.withAlphaComponent(dark ? 0.15 : 0.08)],
+                         locations: [0, 0.55, 1], from: CGPoint(x: rect.minX, y: rect.minY),
+                         to: CGPoint(x: rect.maxX * 0.65, y: rect.maxY))
+                context.restoreGState()
+            }
+        }
+        let cost = image.cgImage.map { $0.bytesPerRow * $0.height } ?? 0
+        cache.setObject(image, forKey: key, cost: cost)
+        return image
+    }
+
+    private static func gradient(_ context: CGContext, colors: [UIColor], locations: [CGFloat],
+                                 from start: CGPoint, to end: CGPoint) {
+        guard let space = CGColorSpace(name: CGColorSpace.sRGB),
+              let gradient = CGGradient(colorsSpace: space,
+                                        colors: colors.map { $0.cgColor } as CFArray, locations: locations) else { return }
+        context.drawLinearGradient(gradient, start: start, end: end, options: [.drawsBeforeStartLocation, .drawsAfterEndLocation])
+    }
+}
+
 private final class TerminalTouchKeycap: UIView {
     let key: TerminalTouchKeyboardModel.Key
     let plate = UIView()
     let label = UILabel()
     let icon = UIImageView()
+    private let subtitleLabel = UILabel()
+    private let drawerKey: Bool
+    private let artwork = UIImageView()
+    private let contactLight = CAShapeLayer()
+    private let homeRidge = CALayer()
     private let lockIndicator = UIView()
     private let toolbarKey: Bool
+    private var finishes: [TerminalTouchKeyArtwork.Finish] = []
+    private var images: [UIImage?] = []
+    private struct Prepared: Equatable {
+        let size: CGSize
+        let scale: CGFloat
+        let palette: TerminalTouchKeyboardPalette?
+        let dark: Bool
+        let increasedContrast: Bool
+    }
+    private var prepared: Prepared?
+    private var displayedIndex: Int?
     var palette: TerminalTouchKeyboardPalette? { didSet { updateColor() } }
-    var locked = false { didSet { lockIndicator.isHidden = !locked } }
+    var locked = false {
+        didSet {
+            guard locked != oldValue else { return }
+            lockIndicator.isHidden = !locked
+            setNeedsLayout()
+        }
+    }
     var activate: (() -> Void)?
-    var pressed = false { didSet { updateColor() } }
-    var selected = false { didSet { updateColor() } }
+    var pressed = false {
+        didSet {
+            guard pressed != oldValue else { return }
+            applyState()
+            animateContact()
+        }
+    }
+    var selected = false { didSet { if selected != oldValue { applyState() } } }
 
-    init(_ key: TerminalTouchKeyboardModel.Key, small: Bool = false) {
+    private var supportsSelection: Bool {
+        switch key.action { case .modifier, .drawer: return true; default: return false }
+    }
+    private var motionAllowed: Bool {
+        !UIAccessibility.isReduceMotionEnabled && !ProcessInfo.processInfo.isLowPowerModeEnabled
+    }
+    private var travel: CGFloat {
+        let scale = max(1, traitCollection.displayScale)
+        return ((toolbarKey ? 0.65 : 1.2) * scale).rounded() / scale
+    }
+
+    init(_ key: TerminalTouchKeyboardModel.Key, small: Bool = false, drawer: Bool = false, subtitle: String? = nil) {
         self.key = key
+        drawerKey = drawer
         self.toolbarKey = small
         super.init(frame: .zero)
         isAccessibilityElement = true
         accessibilityTraits = [.keyboardKey]
         accessibilityLabel = key.accessibility ?? key.title
         plate.isUserInteractionEnabled = false
-        plate.layer.cornerRadius = small ? 12 : 8
         plate.layer.cornerCurve = .continuous
-        plate.layer.shadowColor = UIColor.black.cgColor
-        plate.layer.shadowOffset = CGSize(width: 0, height: 1)
-        plate.layer.shadowRadius = 0.5
         addSubview(plate)
+        artwork.isUserInteractionEnabled = false
+        plate.addSubview(artwork)
+        contactLight.fillColor = UIColor.clear.cgColor
+        contactLight.opacity = 0
+        plate.layer.addSublayer(contactLight)
+        homeRidge.isHidden = key.action != .text(" ")
+        plate.layer.addSublayer(homeRidge)
         label.textAlignment = .center
-        label.font = .systemFont(ofSize: small ? 13 : (key.title.count == 1 ? 25 : 16), weight: small ? .medium : .regular)
+        label.baselineAdjustment = .alignCenters
         label.adjustsFontSizeToFitWidth = true
         label.minimumScaleFactor = 0.75
         label.text = key.title
         plate.addSubview(label)
+        subtitleLabel.text = subtitle
+        subtitleLabel.textAlignment = .center
+        subtitleLabel.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        subtitleLabel.adjustsFontSizeToFitWidth = true
+        subtitleLabel.minimumScaleFactor = 0.65
+        subtitleLabel.isHidden = subtitle == nil
+        plate.addSubview(subtitleLabel)
         icon.contentMode = .scaleAspectFit
-        icon.preferredSymbolConfiguration = UIImage.SymbolConfiguration(pointSize: small ? 17 : 21, weight: .regular)
+        icon.preferredSymbolConfiguration = UIImage.SymbolConfiguration(pointSize: small ? 17 : 21, weight: .medium)
         plate.addSubview(icon)
         lockIndicator.layer.cornerRadius = 1.5
         lockIndicator.isHidden = true
         plate.addSubview(lockIndicator)
         setSymbol(key.symbol)
+        registerForTraitChanges([UITraitUserInterfaceStyle.self, UITraitDisplayScale.self, UITraitAccessibilityContrast.self]) {
+            (self: TerminalTouchKeycap, _: UITraitCollection) in
+            self.updateColor()
+            self.finishVisualTransition()
+            self.setNeedsLayout()
+        }
         updateColor()
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
     func setSymbol(_ name: String?) {
         icon.image = name.flatMap { UIImage(systemName: $0) }
         label.isHidden = icon.image != nil
     }
+
     override func layoutSubviews() {
         super.layoutSubviews()
-        plate.frame = bounds.insetBy(dx: 3, dy: 5)
-        label.frame = plate.bounds.insetBy(dx: 3, dy: 0)
-        lockIndicator.frame = CGRect(x: (plate.bounds.width - 14) / 2, y: plate.bounds.height - 4, width: 14, height: 2.5)
-        let iconSize = CGSize(width: min(24, max(0, plate.bounds.width - 8)), height: min(23, max(0, plate.bounds.height - 6)))
-        icon.frame = CGRect(x: (plate.bounds.width - iconSize.width) / 2, y: (plate.bounds.height - iconSize.height) / 2,
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        // Only this non-interactive plate moves. The cap and its typing cell
+        // retain exactly the original hit geometry, including the full gutters.
+        let rect = bounds.insetBy(dx: drawerKey ? 1 : 3, dy: drawerKey ? 1 : 5)
+        let scale = max(1, traitCollection.displayScale)
+        plate.bounds = CGRect(origin: .zero, size: CGSize(
+            width: max(0, (rect.width * scale).rounded(.down) / scale),
+            height: max(0, (rect.height * scale).rounded(.down) / scale)))
+        plate.center = CGPoint(x: bounds.midX, y: bounds.midY)
+        plate.isHidden = plate.bounds.width <= 2 || plate.bounds.height <= 2
+        let height = plate.bounds.height
+        let preferred: CGFloat = toolbarKey ? 13 : (drawerKey
+            ? (subtitleLabel.isHidden && key.title.count <= 4 ? 17 : 12)
+            : (key.title.count == 1 ? 25 : 16))
+        label.font = .systemFont(ofSize: min(preferred, max(12, height - 6)),
+                                 weight: toolbarKey || drawerKey || key.title.count > 1 ? .medium : .regular)
+        label.frame = CGRect(x: 3, y: 0, width: max(0, plate.bounds.width - 6), height: max(0, height - (locked ? 4 : 0)))
+        if drawerKey {
+            label.numberOfLines = subtitleLabel.isHidden ? 2 : 1
+            if !subtitleLabel.isHidden {
+                let subtitleHeight = min(15, height * 0.45)
+                label.frame.size.height = max(0, height - subtitleHeight - 2)
+                subtitleLabel.frame = CGRect(x: 3, y: label.frame.maxY, width: label.frame.width, height: subtitleHeight)
+            }
+        }
+        lockIndicator.frame = CGRect(x: (plate.bounds.width - 14) / 2, y: height - 4, width: 14, height: 2.5)
+        let iconSize = CGSize(width: min(24, max(0, plate.bounds.width - 8)), height: min(23, max(0, height - (locked ? 10 : 6))))
+        icon.frame = CGRect(x: (plate.bounds.width - iconSize.width) / 2, y: (height - (locked ? 4 : 0) - iconSize.height) / 2,
                             width: iconSize.width, height: iconSize.height)
+        let ridgeWidth = min(22, plate.bounds.width * 0.18)
+        homeRidge.frame = CGRect(x: (plate.bounds.width - ridgeWidth) / 2, y: height - 3.5, width: ridgeWidth, height: 1 / scale)
+        homeRidge.cornerRadius = 0.5 / scale
+        updateColor()
+        CATransaction.commit()
     }
+
     func updateColor() {
         let character: Bool = { if case .text = key.action { return true }; return false }()
-        let selected = self.selected, pressed = self.pressed, toolbarKey = self.toolbarKey
-        // A keyboard can acquire its final appearance after attachment. Do not
-        // mix a light-only background with a dynamically changing .label color.
-        plate.backgroundColor = UIColor { traits in
+        let dark = traitCollection.userInterfaceStyle == .dark
+        let increasedContrast = UIAccessibility.isDarkerSystemColorsEnabled || traitCollection.accessibilityContrast == .high
+        let next = Prepared(size: plate.bounds.size, scale: max(1, traitCollection.displayScale),
+                            palette: palette, dark: dark, increasedContrast: increasedContrast)
+        // publishModifiers refreshes every legend after each character. Most
+        // calls stop here; theme resolution and lighting math stay off that path.
+        guard prepared != next else { applyState(); return }
+        prepared = next
+        let role: TerminalTouchKeyArtwork.Role = toolbarKey ? .toolbar : (character ? .character : .utility)
+        func finish(selected: Bool, pressed: Bool) -> TerminalTouchKeyArtwork.Finish {
+            let colors = TerminalTouchKeyboardModel.keyColors(dark: dark, character: character, pressed: pressed, selected: selected)
+            var surface = TerminalTouchKeyColor(red: colors.background, green: colors.background,
+                                                blue: colors.background + (dark && !selected ? 4 / 255 : 0))
+            var ink = TerminalTouchKeyColor(red: colors.ink, green: colors.ink, blue: colors.ink)
+            if let palette {
+                surface = TerminalTouchKeyColor(selected ? palette.ink : (pressed ? palette.pressedKey : palette.key), traits: traitCollection)
+                ink = TerminalTouchKeyColor(selected ? palette.key : (pressed ? palette.pressedInk : palette.ink), traits: traitCollection)
+            }
             if toolbarKey && !selected {
-                return pressed ? UIColor.label.resolvedColor(with: traits).withAlphaComponent(0.12) : .clear
+                surface = TerminalTouchKeyColor(palette?.background ?? TerminalTouchKeyboardAppearance.toolbar, traits: traitCollection)
+                ink = TerminalTouchKeyColor(palette?.toolbarInk ?? .label, traits: traitCollection)
+                surface = surface.mixed(toward: ink, amount: pressed ? 0.12 : 0.035)
             }
-            let colors = TerminalTouchKeyboardModel.keyColors(dark: traits.userInterfaceStyle == .dark,
-                character: character, pressed: pressed, selected: selected)
-            if traits.userInterfaceStyle == .dark, !selected {
-                return UIColor(red: colors.background, green: colors.background, blue: colors.background + 4 / 255, alpha: 1)
-            }
-            return UIColor(white: colors.background, alpha: 1)
+            return .init(surface: surface, ink: ink, role: role, pressed: pressed, selected: selected,
+                         increasedContrast: increasedContrast)
         }
-        let ink = UIColor { traits in
-            let colors = TerminalTouchKeyboardModel.keyColors(dark: traits.userInterfaceStyle == .dark,
-                character: character, pressed: pressed, selected: selected)
-            return UIColor(white: colors.ink, alpha: 1)
+        // Prewarm both contact states (and both modifier states) during layout
+        // or an appearance change. The pressed/selected setters never rasterize.
+        let selections = supportsSelection ? [false, true] : [false]
+        finishes = selections.flatMap { selected in [false, true].map { finish(selected: selected, pressed: $0) } }
+        images = finishes.map { TerminalTouchKeyArtwork.image(size: next.size, scale: next.scale, finish: $0) }
+        if let finish = finishes.first {
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            artwork.frame = plate.bounds.insetBy(dx: -finish.padding, dy: -finish.padding)
+            plate.layer.cornerRadius = finish.radius(in: plate.bounds.size)
+            contactLight.frame = plate.bounds
+            contactLight.path = plate.bounds.width > 3 && plate.bounds.height > 3
+                ? UIBezierPath(roundedRect: plate.bounds.insetBy(dx: 1, dy: 1),
+                               cornerRadius: max(0, plate.layer.cornerRadius - 1)).cgPath : nil
+            contactLight.lineWidth = 1 / next.scale
+            CATransaction.commit()
         }
+        displayedIndex = nil
+        applyState()
+    }
+
+    private func applyState() {
+        let index = (selected && supportsSelection ? 2 : 0) + (pressed ? 1 : 0)
+        guard displayedIndex != index, finishes.indices.contains(index) else { return }
+        displayedIndex = index
+        let finish = finishes[index]
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        artwork.image = images.indices.contains(index) ? images[index] : nil
+        plate.backgroundColor = artwork.image == nil ? finish.surface.uiColor : .clear
+        let ink = finish.ink.uiColor
         label.textColor = ink
+        subtitleLabel.textColor = ink
         icon.tintColor = ink
         lockIndicator.backgroundColor = ink
-        if let palette {
-            let themedInk = selected ? palette.key : (toolbarKey ? palette.toolbarInk : (pressed ? palette.pressedInk : palette.ink))
-            plate.backgroundColor = selected ? palette.ink : (toolbarKey ? (pressed ? palette.toolbarInk.withAlphaComponent(0.12) : .clear) : (pressed ? palette.pressedKey : palette.key))
-            label.textColor = themedInk
-            icon.tintColor = themedInk
-            lockIndicator.backgroundColor = themedInk
-        }
-        plate.layer.shadowOpacity = toolbarKey || traitCollection.userInterfaceStyle == .dark ? 0 : 0.12
-        plate.layer.borderWidth = UIAccessibility.isDarkerSystemColorsEnabled && (!toolbarKey || selected) ? 1 : 0
-        plate.layer.borderColor = UIColor.label.cgColor
+        homeRidge.backgroundColor = ink.withAlphaComponent(finish.increasedContrast ? 0.8 : 0.28).cgColor
+        contactLight.strokeColor = ink.withAlphaComponent(0.38).cgColor
+        CATransaction.commit()
         accessibilityTraits = selected ? [.keyboardKey, .selected] : [.keyboardKey]
+    }
+
+    private func animateContact() {
+        let previous = plate.layer.presentation()?.transform.m42 ?? plate.layer.transform.m42
+        finishVisualTransition()
+        guard motionAllowed, window != nil, !isHidden, !plate.isHidden else { return }
+        let target: CGFloat = pressed ? travel : 0
+        let motion: CABasicAnimation
+        if pressed {
+            let down = CABasicAnimation(keyPath: "transform.translation.y")
+            down.duration = 0.045
+            down.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            motion = down
+        } else {
+            let release = CASpringAnimation(keyPath: "transform.translation.y")
+            release.mass = 0.6
+            release.stiffness = 650
+            release.damping = 36
+            release.initialVelocity = 0
+            release.duration = min(0.28, release.settlingDuration)
+            motion = release
+        }
+        motion.fromValue = previous
+        motion.toValue = target
+        plate.layer.add(motion, forKey: "keyboard.contactTravel")
+        // This means contact, not successful input: cancelled contacts must not
+        // leave a delayed 'success' sparkle or any callback into the input path.
+        if pressed && !UIAccessibility.isDarkerSystemColorsEnabled && traitCollection.accessibilityContrast != .high {
+            let light = CAKeyframeAnimation(keyPath: "opacity")
+            light.values = [0, 0.75, 0]
+            light.keyTimes = [0, 0.22, 1]
+            light.duration = 0.20
+            contactLight.add(light, forKey: "keyboard.contactLight")
+        }
+    }
+
+    func finishVisualTransition() {
+        plate.layer.removeAnimation(forKey: "keyboard.contactTravel")
+        contactLight.removeAnimation(forKey: "keyboard.contactLight")
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        plate.layer.transform = CATransform3DMakeTranslation(0, pressed && motionAllowed ? travel : 0, 0)
+        contactLight.opacity = 0
+        CATransaction.commit()
+    }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        finishVisualTransition()
+        if window != nil { updateColor() }
     }
     override func accessibilityActivate() -> Bool { activate?(); return true }
 }
 
+/// Reuses the key's material without changing the existing preview's position,
+/// timing, or text. It deliberately has no entrance animation or touch handling.
+private final class TerminalTouchKeyPreview: UIView {
+    private let artwork = UIImageView()
+    private let label = UILabel()
+    private struct Prepared: Equatable {
+        let size: CGSize
+        let scale: CGFloat
+        let palette: TerminalTouchKeyboardPalette?
+        let dark: Bool
+        let increasedContrast: Bool
+    }
+    private var prepared: Prepared?
+    var palette: TerminalTouchKeyboardPalette? { didSet { updateAppearance() } }
+    var text: String? { get { label.text } set { label.text = newValue } }
+
+    init() {
+        // Match showPreview's existing geometry and warm the texture before the
+        // first key press. Subsequent origin-only moves reuse that same texture.
+        super.init(frame: CGRect(x: 0, y: 0, width: 52, height: 55))
+        isUserInteractionEnabled = false
+        isAccessibilityElement = false
+        accessibilityElementsHidden = true
+        artwork.isUserInteractionEnabled = false
+        addSubview(artwork)
+        label.font = .systemFont(ofSize: 32, weight: .regular)
+        label.textAlignment = .center
+        label.adjustsFontSizeToFitWidth = true
+        label.minimumScaleFactor = 0.65
+        addSubview(label)
+        registerForTraitChanges([UITraitUserInterfaceStyle.self, UITraitDisplayScale.self, UITraitAccessibilityContrast.self]) {
+            (self: TerminalTouchKeyPreview, _: UITraitCollection) in self.updateAppearance()
+        }
+        updateAppearance()
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        label.frame = bounds.insetBy(dx: 5, dy: 2)
+        updateAppearance()
+    }
+    private func updateAppearance() {
+        let next = Prepared(size: bounds.size, scale: max(1, traitCollection.displayScale), palette: palette,
+                            dark: traitCollection.userInterfaceStyle == .dark,
+                            increasedContrast: UIAccessibility.isDarkerSystemColorsEnabled || traitCollection.accessibilityContrast == .high)
+        guard prepared != next else { return }
+        prepared = next
+        let finish = TerminalTouchKeyArtwork.Finish(
+            surface: TerminalTouchKeyColor(palette?.key ?? .secondarySystemBackground, traits: traitCollection),
+            ink: TerminalTouchKeyColor(palette?.ink ?? .label, traits: traitCollection),
+            role: .preview, pressed: false, selected: false,
+            increasedContrast: next.increasedContrast)
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        artwork.frame = bounds.insetBy(dx: -finish.padding, dy: -finish.padding)
+        artwork.image = TerminalTouchKeyArtwork.image(size: next.size, scale: next.scale, finish: finish)
+        label.textColor = finish.ink.uiColor
+        CATransaction.commit()
+    }
+}
+
+/// Drawer buttons share the main keycap renderer while retaining UIKit input.
+private final class TerminalTouchDrawerButton: TerminalTouchRepeatingButton {
+    let keycap: TerminalTouchKeycap
+
+    init(key: TerminalTouchKeyboardModel.Key, subtitle: String?, toolbar: Bool,
+         palette: TerminalTouchKeyboardPalette?) {
+        keycap = TerminalTouchKeycap(key, small: toolbar, drawer: true, subtitle: subtitle)
+        super.init(frame: .zero)
+        keycap.isUserInteractionEnabled = false
+        keycap.isAccessibilityElement = false
+        keycap.accessibilityElementsHidden = true
+        keycap.palette = palette
+        addSubview(keycap)
+        accessibilityTraits.insert(.keyboardKey)
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        keycap.frame = bounds
+    }
+    override var isSelected: Bool {
+        didSet { keycap.selected = isSelected }
+    }
+    override func updateContactAppearance() {
+        keycap.pressed = contactPressed
+    }
+    override func cancelInteraction() {
+        super.cancelInteraction()
+        keycap.finishVisualTransition()
+    }
+}
+
 /// UIKit cancels the ordinary button tap when this recognizer starts repeating.
-private final class TerminalTouchRepeatingButton: UIButton {
+private class TerminalTouchRepeatingButton: UIButton {
+    override var isHighlighted: Bool {
+        didSet { updateContactAppearance() }
+    }
+    private var repeatingContact = false
+    var contactPressed: Bool { isHighlighted || repeatingContact }
+    func updateContactAppearance() {}
+
     var repeatAction: (() -> Void)?
     private var repeatTask: Task<Void, Never>?
     var interactionMode: KeyboardToolbarInteractionMode = .accessory
@@ -241,6 +731,8 @@ private final class TerminalTouchRepeatingButton: UIButton {
     }
     @objc private func handleHold(_ gesture: UILongPressGestureRecognizer) {
         if gesture.state == .began, validTouch {
+            repeatingContact = true
+            updateContactAppearance()
             repeatAction?()
             repeatTask = Task { @MainActor [weak self] in
                 while !Task.isCancelled {
@@ -253,7 +745,11 @@ private final class TerminalTouchRepeatingButton: UIButton {
             cancelInteraction()
         }
     }
-    func cancelRepeat() { repeatTask?.cancel(); repeatTask = nil }
+    func cancelRepeat() {
+        repeatTask?.cancel(); repeatTask = nil
+        repeatingContact = false
+        updateContactAppearance()
+    }
     override func didMoveToWindow() { super.didMoveToWindow(); if window == nil { cancelInteraction() } }
 }
 
@@ -419,9 +915,7 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate, UIGesture
     private var toolbarDrawerOpenByDefault = KeyboardToolbarManager.shared.drawerOpenByDefault
     private var toolbarDrawerRows: [UIScrollView] = []
     private var toolbarDrawerIndices: [Int] = []
-    private var toolbarDrawerButtons: [[TerminalTouchRepeatingButton]] = []
-    private var toolbarDrawerModifiers: [TerminalTouchRepeatingButton: Model.Modifier] = [:]
-    private var toolbarDrawerDismissButtons: [TerminalTouchRepeatingButton] = []
+    private var toolbarDrawerButtons: [[TerminalTouchDrawerButton]] = []
     private var toolbarDrawerHeight: CGFloat { CGFloat(toolbarDrawerRows.count) * 44 }
     private var toolbarHeight: CGFloat { 48 + toolbarDrawerHeight }
     private var configuredMain: [Model.Key] = []
@@ -460,10 +954,14 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate, UIGesture
     private let presets = UISegmentedControl(items: Model.Preset.allCases.map(\.rawValue))
     private let writingAssistanceButton = TerminalTouchRepeatingButton(type: .system)
     private let grabber = UIButton(type: .system)
-    private var drawerButtons: [TerminalTouchRepeatingButton] = []
+    private var drawerButtons: [TerminalTouchDrawerButton] = []
     private var drawerColumns = 6
+    private var allKeycaps: [TerminalTouchKeycap] {
+        controls + rows.flatMap { $0 } + drawerButtons.map(\.keycap)
+            + toolbarDrawerButtons.flatMap { $0 }.map(\.keycap)
+    }
     private let suggestions = UIStackView()
-    private let preview = UILabel()
+    private let preview = TerminalTouchKeyPreview()
     private let accents = UIStackView()
     private var accentChoices: [String] = []
     private var accentIndex = 0
@@ -586,10 +1084,6 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate, UIGesture
         suggestions.axis = .horizontal
         suggestions.distribution = .fillEqually
         addSubview(suggestions)
-        preview.textAlignment = .center
-        preview.font = .systemFont(ofSize: 32)
-        preview.layer.cornerRadius = 10
-        preview.clipsToBounds = true
         preview.isUserInteractionEnabled = false
         preview.isHidden = true
         addSubview(preview)
@@ -641,12 +1135,21 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate, UIGesture
             self?.updateBackgroundEffect()
         }.store(in: &observations)
         for name in [UIApplication.willResignActiveNotification, UIApplication.didBecomeActiveNotification,
+                     UIAccessibility.reduceMotionStatusDidChangeNotification,
+                     Notification.Name.NSProcessInfoPowerStateDidChange,
                      UIAccessibility.reduceTransparencyStatusDidChangeNotification,
                      UIAccessibility.darkerSystemColorsStatusDidChangeNotification, Notification.Name.settingsDidChange,
                      KeyboardToolbarManager.layoutDidChangeNotification] {
             let token = NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated {
                     guard let self else { return }
+                    if name == UIAccessibility.reduceMotionStatusDidChangeNotification
+                        || name == Notification.Name.NSProcessInfoPowerStateDidChange {
+                        // Changing visual policy must not cancel a held key,
+                        // rebuild the hit grid, or consume sticky modifiers.
+                        self.allKeycaps.forEach { $0.finishVisualTransition() }
+                        return
+                    }
                     // Activation only pauses and resumes the effect. Settings,
                     // theme and toolbar changes each arrive through their own
                     // notification, so no rebuild is needed on either edge.
@@ -827,10 +1330,9 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate, UIGesture
         pageIndicator.effect = UIAccessibility.isReduceTransparencyEnabled ? nil : UIBlurEffect(style: .systemUltraThinMaterialDark)
         pageIndicator.contentView.backgroundColor = UIColor.black.withAlphaComponent(UIAccessibility.isReduceTransparencyEnabled ? 0.9 : 0.3)
         grabber.tintColor = palette?.toolbarInk ?? .label
-        preview.backgroundColor = palette?.key ?? .secondarySystemBackground
-        preview.textColor = palette?.ink ?? .label
+        preview.palette = palette
         accents.backgroundColor = palette?.key ?? .secondarySystemBackground
-        (controls + rows.flatMap { $0 }).forEach { $0.palette = palette }
+        allKeycaps.forEach { $0.palette = palette }
         refreshWritingAssistance()
         rebuildToolbarDrawers()
         updateModifierAppearance()
@@ -1375,6 +1877,7 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate, UIGesture
         hidePageIndicator()
         contacts.values.forEach { $0.task?.cancel(); $0.initial.pressed = false; $0.current?.pressed = false }
         contacts.removeAll()
+        allKeycaps.forEach { $0.finishVisualTransition() }
         (drawerButtons + toolbarDrawerButtons.flatMap { $0 }).forEach { $0.cancelInteraction() }
         writingAssistanceButton.cancelInteraction()
         sequenceTask?.cancel(); sequenceTask = nil
@@ -1407,19 +1910,7 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate, UIGesture
     }
 
     private func updateModifierAppearance() {
-        for button in toolbarDrawerDismissButtons {
-            button.configuration?.title = nil
-            button.configuration?.image = UIImage(systemName: dismissSymbol,
-                withConfiguration: UIImage.SymbolConfiguration(pointSize: 17))
-            button.accessibilityLabel = dismissAccessibilityLabel
-            button.accessibilityValue = pinnedHidden ? String(localized: "Pinned") : nil
-        }
-        for (button, modifier) in toolbarDrawerModifiers {
-            button.isSelected = modifierState.isActive(modifier)
-            button.configuration?.baseBackgroundColor = button.isSelected ? (palette?.toolbarInk ?? .label).withAlphaComponent(0.2) : .clear
-            button.accessibilityValue = modifierState.locked.contains(modifier) ? "Locked" : (button.isSelected ? "On" : "Off")
-        }
-        for cap in controls + rows.flatMap({ $0 }) {
+        for cap in controls + rows.flatMap({ $0 }) + toolbarDrawerButtons.flatMap({ $0 }).map(\.keycap) {
             if cap.key.action == .drawer { cap.selected = toolbarDrawerState != .closed }
             switch cap.key.action {
             case .key("\u{1b}"): cap.setSymbol(glyphsEnabled ? "escape" : nil)
@@ -1444,6 +1935,12 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate, UIGesture
                 cap.updateColor()
                 cap.label.text = text == " " ? "space" : (modifierState.isActive(.shift) ? text.uppercased() : text)
             }
+        }
+        for button in toolbarDrawerButtons.flatMap({ $0 }) {
+            button.isSelected = button.keycap.selected
+            button.accessibilityTraits = button.keycap.accessibilityTraits.union(.button)
+            button.accessibilityLabel = button.keycap.accessibilityLabel
+            button.accessibilityValue = button.keycap.accessibilityValue
         }
     }
 
@@ -1618,23 +2115,11 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate, UIGesture
     }
     @discardableResult
     private func drawerButton(_ title: String, subtitle: String? = nil, repeats: Bool = false,
-                              in container: UIView? = nil, action: @escaping () -> Void) -> TerminalTouchRepeatingButton {
-        let button = TerminalTouchRepeatingButton(type: .system)
-        var config = palette == nil ? UIButton.Configuration.tinted() : UIButton.Configuration.filled()
-        config.title = title
-        config.subtitle = subtitle
-        config.baseForegroundColor = palette?.ink ?? .label
-        config.baseBackgroundColor = palette?.key ?? .secondaryLabel
-        config.cornerStyle = .medium
-        config.contentInsets = NSDirectionalEdgeInsets(top: 2, leading: 3, bottom: 2, trailing: 3)
-        config.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { input in
-            var output = input; output.font = .systemFont(ofSize: subtitle == nil && title.count <= 4 ? 17 : 12, weight: .medium); return output
-        }
-        config.subtitleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { input in
-            var output = input; output.font = .monospacedSystemFont(ofSize: 12, weight: .regular); return output
-        }
-        button.configuration = config
-        button.titleLabel?.numberOfLines = 2
+                              key: Model.Key? = nil, in container: UIView? = nil,
+                              action: @escaping () -> Void) -> TerminalTouchDrawerButton {
+        let button = TerminalTouchDrawerButton(
+            key: key ?? Model.Key(title: title, action: toolPage == .symbols ? .text(title) : .key(title)),
+            subtitle: subtitle, toolbar: container != nil, palette: palette)
         button.accessibilityLabel = [title, subtitle].compactMap { $0 }.joined(separator: ", ")
         button.addAction(UIAction { [weak self] _ in guard self?.canSend == true else { return }; action() }, for: .touchUpInside)
         if repeats { button.enableRepeat { [weak self] in guard self?.canSend == true else { return }; action() } }
@@ -1706,12 +2191,12 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate, UIGesture
         setNeedsLayout()
     }
 
-    private func layoutToolbarDrawer(_ row: UIScrollView, buttons: [TerminalTouchRepeatingButton],
+    private func layoutToolbarDrawer(_ row: UIScrollView, buttons: [TerminalTouchDrawerButton],
                                      position: Int, leading: CGFloat, width: CGFloat) {
         row.frame = CGRect(x: leading + 5, y: CGFloat(position) * 44, width: max(0, width - 10), height: 44)
         var x: CGFloat = 0
         for button in buttons {
-            let titleWidth = ((button.configuration?.title ?? "") as NSString).size(withAttributes: [.font: UIFont.systemFont(ofSize: 13)]).width
+            let titleWidth = ((button.keycap.icon.image == nil ? button.keycap.key.title : "") as NSString).size(withAttributes: [.font: UIFont.systemFont(ofSize: 13)]).width
             let buttonWidth = max(40, min(120, titleWidth + 20))
             button.frame = CGRect(x: x, y: 2, width: buttonWidth, height: 40)
             x += buttonWidth + 2
@@ -1792,12 +2277,6 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate, UIGesture
         toolbarDrawerRows.removeAll()
         toolbarDrawerButtons.removeAll()
         toolbarDrawerIndices = indices
-        toolbarDrawerDismissButtons = toolbarDrawerDismissButtons.filter { button in
-            preservingRows && indices.contains { index in previousRows[index]?.1.contains(button) == true }
-        }
-        toolbarDrawerModifiers = toolbarDrawerModifiers.filter { button, _ in
-            preservingRows && indices.contains { index in previousRows[index]?.1.contains(button) == true }
-        }
         for index in indices {
             if preservingRows, let (row, buttons) = previousRows[index] {
                 toolbarDrawerRows.append(row)
@@ -1810,10 +2289,10 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate, UIGesture
             row.alwaysBounceHorizontal = false
             addSubview(row)
             toolbarDrawerRows.append(row)
-            var buttons: [TerminalTouchRepeatingButton] = []
+            var buttons: [TerminalTouchDrawerButton] = []
             for key in toolbarDrawerKeys[index] {
                 let repeats: Bool = { if case .key = key.action { return true }; return false }()
-                let button = drawerButton(key.title, repeats: repeats, in: row) { [weak self] in
+                let button = drawerButton(key.title, repeats: repeats, key: key, in: row) { [weak self] in
                     guard let self else { return }
                     if case .modifier(let modifier) = key.action {
                         self.modifierState.begin(modifier)
@@ -1821,25 +2300,8 @@ final class TerminalTouchKeyboardView: UIView, KeyboardButtonDelegate, UIGesture
                         self.publishModifiers()
                     } else { self.perform(key) }
                 }
-                var config = button.configuration!
-                config.baseBackgroundColor = .clear
-                config.baseForegroundColor = palette?.toolbarInk ?? .label
-                let usesGlyph: Bool = {
-                    switch key.action {
-                    case .modifier, .key("\u{1b}"), .key("\t"): return glyphsEnabled
-                    default: return true
-                    }
-                }()
-                if let symbol = key.symbol, usesGlyph,
-                   let image = UIImage(systemName: symbol, withConfiguration: UIImage.SymbolConfiguration(pointSize: 17)) {
-                    config.title = nil
-                    config.image = image
-                }
-                button.configuration = config
                 button.interactionMode = toolbarInteractionMode
                 button.accessibilityLabel = key.accessibility ?? key.title
-                if case .modifier(let modifier) = key.action { toolbarDrawerModifiers[button] = modifier }
-                if key.action == .dismiss { toolbarDrawerDismissButtons.append(button) }
                 if key.action == .toolbar(KeyID.writingAssistance.keyValue) {
                     button.showsMenuAsPrimaryAction = true
                     button.menu = writingAssistanceMenu()
