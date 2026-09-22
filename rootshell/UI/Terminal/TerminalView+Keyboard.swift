@@ -265,7 +265,7 @@ extension Ghostty.TerminalView {
         if presses.contains(where: { shouldPassHardwareCtrlSpaceToSystem($0) }) {
             modTapInterceptor.noteChordUse()
             yieldInputLanguageOverrideForSystemCycle()
-            keyboardAccessory?.toolbarView.clearOneShotModifiers()
+            keyboardAccessoryController?.clearOneShotModifiers()
             super.pressesBegan(presses, with: event)
             return
         }
@@ -307,7 +307,7 @@ extension Ghostty.TerminalView {
             if !result.handled && !result.skipSuper { forwardedPresses.insert(press) }
         }
 
-        if handled { keyboardAccessory?.toolbarView.clearOneShotModifiers() }
+        if handled { keyboardAccessoryController?.clearOneShotModifiers() }
         if !forwardedPresses.isEmpty {
             super.pressesBegan(forwardedPresses, with: event)
         }

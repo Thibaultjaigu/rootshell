@@ -1254,13 +1254,18 @@ class KeyboardToolbarView: UIView {
     }
 
     private var dismissButtonIconName: String {
-        if dismissButtonPinned {
+        Self.dismissSymbolName(pinned: dismissButtonPinned, showsRestore: dismissButtonShowsRestore)
+    }
+
+    /// Shared by the system-keyboard toolbar and the custom keyboard.
+    static func dismissSymbolName(pinned: Bool, showsRestore: Bool) -> String {
+        if pinned {
             for candidate in ["keyboard.slash", "chevron.up.2"] where UIImage(systemName: candidate) != nil {
                 return candidate
             }
             return "chevron.up"
         }
-        return dismissButtonShowsRestore ? "chevron.up" : "chevron.down"
+        return showsRestore ? "chevron.up" : "chevron.down"
     }
 
     func setMouseCaptureOverrideActive(_ active: Bool) {

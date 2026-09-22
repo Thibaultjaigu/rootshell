@@ -3310,7 +3310,7 @@ extension Ghostty {
             guard newLang != lastInputModePrimaryLanguage else { return }
             if newLang == "emoji" || lastInputModePrimaryLanguage == "emoji" {
                 resetKeyboardInteractionState(sendSyntheticKeyReleases: true)
-                keyboardAccessory?.toolbarView.clearOneShotModifiers()
+                keyboardAccessoryController?.clearOneShotModifiers()
             }
             lastInputModePrimaryLanguage = newLang
 
@@ -4146,7 +4146,7 @@ extension Ghostty {
                     guard let self else { return }
                     self.notifyInputDelegateOfExternalChange { /* buffer already reset */ }
                 }
-                activeToolbarView?.clearOneShotModifiers()
+                keyboardAccessoryController?.clearOneShotModifiers()
                 return
             }
 
@@ -4175,7 +4175,7 @@ extension Ghostty {
                    let localSession = session as? LocalShellSession,
                    !localSession.hasActiveEmbeddedSession {
                     localSession.interrupt()
-                    activeToolbarView?.clearOneShotModifiers()
+                    keyboardAccessoryController?.clearOneShotModifiers()
                     return
                 }
                 #endif
@@ -4183,7 +4183,7 @@ extension Ghostty {
                 // Try routing through Ghostty's key encoder first
                 if text.count == 1, let char = text.first,
                    sendViaGhosttyKeyEvent(char, modifiers: activeKeyboardModifiers) {
-                    activeToolbarView?.clearOneShotModifiers()
+                    keyboardAccessoryController?.clearOneShotModifiers()
                     return
                 }
 
@@ -4222,7 +4222,7 @@ extension Ghostty {
                 }
 
                 // Clear one-shot modifiers after applying (locked modifiers persist)
-                activeToolbarView?.clearOneShotModifiers()
+                keyboardAccessoryController?.clearOneShotModifiers()
             }
 
             // Apply active mod-tap virtual modifier when input is routed through UITextInput.
@@ -4309,7 +4309,7 @@ extension Ghostty {
             sendUserInput(data, documentMutation: .backspace(eligible: assistanceEligible))
 
             // Clear one-shot modifiers (backspace consumes them too)
-            activeToolbarView?.clearOneShotModifiers()
+            keyboardAccessoryController?.clearOneShotModifiers()
         }
         
         func handleSpecialKey(_ key: UIKey, characters: String, modifiers: UIKeyModifierFlags) -> String? {
