@@ -1371,16 +1371,20 @@ final class TerminalKeyboardAccessoryController: NSObject {
             toolbarIsAtScreenEdge = hardwareAccessoryOnly
                 || !EffectManager.shared.isKeyboardDocked
         }
-        let enabled = (idiom == .phone || idiom == .pad)
+        let needsTouchProtection = (idiom == .phone || idiom == .pad)
             && isVisible
-            && host?.keyboardAccessoryHasBottomSafeAreaSpacer != true
-            && !reservesBottomSafeAreaStrip
             && toolbarIsAtScreenEdge
-        bottomEdgeHomeGestureProtectionEnabled = enabled
-        keyboardAccessory?.setBottomEdgeHomeGestureProtectionEnabled(enabled)
+        let hasSpacer = host?.keyboardAccessoryHasBottomSafeAreaSpacer == true
+            || reservesBottomSafeAreaStrip
+        let mode: KeyboardToolbarInteractionMode = needsTouchProtection
+            ? (hasSpacer ? .spacedBottom : .screenEdge) : .accessory
+        // A spacer preserves ordinary Home gestures, but does not make touches
+        // on the nearby keys safe to dispatch before we know they are taps.
+        bottomEdgeHomeGestureProtectionEnabled = mode == .screenEdge
+        keyboardAccessory?.setInteractionMode(mode)
         #else
         bottomEdgeHomeGestureProtectionEnabled = false
-        keyboardAccessory?.setBottomEdgeHomeGestureProtectionEnabled(false)
+        keyboardAccessory?.setInteractionMode(.accessory)
         #endif
     }
 }
