@@ -2698,12 +2698,13 @@ final class TmuxController {
     /// Panes of one window in visual (split-tree leaf) order, with display
     /// titles. Falls back to paneViews-dict order if the tab/tree is missing
     /// (mid-reconcile). For swap-pane pickers.
+    /// Use the resolved pane identity, not the raw surface's "ghostty" default.
     func paneSummaries(inWindow windowId: Int) -> [(paneId: Int, title: String)] {
         if let tab = windowTabs[windowId] {
             var out: [(paneId: Int, title: String)] = []
             for view in tab.splitTree.terminalLeaves {
                 if let binding = view.tmuxPaneBinding, binding.windowId == windowId {
-                    out.append((paneId: binding.paneId, title: view.title))
+                    out.append((paneId: binding.paneId, title: view.presentation.title))
                 }
             }
             if !out.isEmpty { return out }
@@ -2711,7 +2712,7 @@ final class TmuxController {
         return paneViews
             .compactMap { paneId, view in
                 view.tmuxPaneBinding?.windowId == windowId
-                    ? (paneId: paneId, title: view.title) : nil
+                    ? (paneId: paneId, title: view.presentation.title) : nil
             }
             .sorted { $0.paneId < $1.paneId }
     }
