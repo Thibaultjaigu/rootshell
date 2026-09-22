@@ -226,6 +226,10 @@ extension UIApplication {
         sendAction(#selector(Ghostty.TerminalView.menuEqualizeSplits(_:)), to: nil, from: sender, for: nil)
     }
 
+    @objc func ghostty_chooseTmuxPaneToZoom(_ sender: Any?) {
+        sendAction(#selector(Ghostty.TerminalView.menuChooseTmuxPaneToZoom(_:)), to: nil, from: sender, for: nil)
+    }
+
     @objc func ghostty_toggleTabBar(_ sender: Any?) {
         sendAction(#selector(Ghostty.TerminalView.menuToggleTabBar(_:)), to: nil, from: sender, for: nil)
     }
@@ -1306,7 +1310,9 @@ class CatalystAppDelegate: AppDelegate {
         )
 
         let splitManageGroup = UIMenu(title: "", options: .displayInline, children: [
-            toggleZoom, equalize
+            toggleZoom, equalize,
+            UICommand(title: String(localized: "Choose Pane to Zoom"),
+                      action: #selector(UIApplication.ghostty_chooseTmuxPaneToZoom(_:)))
         ])
 
         // Scroll commands

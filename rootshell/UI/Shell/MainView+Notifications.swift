@@ -230,6 +230,13 @@ extension MainView {
             self.equalizeSplits()
         }
 
+        observerBag.observeOnMainActor(.chooseTmuxPaneToZoom) { [self] notification in
+            guard self.shouldHandleNotification(notification),
+                  !isAnySheetPresented,
+                  terminals.indices.contains(selectedTabIndex) else { return }
+            terminals[selectedTabIndex].focusedPane?.enclosingSplitHost?.showTmuxPaneZoomPicker()
+        }
+
         observerBag.observeOnMainActor(.focusSplit) { [self] notification in
             guard let paneView = notification.object as? SplitPaneView else { return }
             guard terminals.indices.contains(selectedTabIndex) else { return }

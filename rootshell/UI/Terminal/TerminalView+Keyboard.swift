@@ -2382,6 +2382,11 @@ extension Ghostty.TerminalView {
         NotificationCenter.default.post(name: .equalizeSplits, object: self)
     }
 
+    @objc func menuChooseTmuxPaneToZoom(_ sender: Any?) {
+        noteModTapCommand(sender as? UIKeyCommand)
+        enclosingSplitHost?.showTmuxPaneZoomPicker()
+    }
+
     @objc func menuOpenSettings(_ sender: Any?) {
         noteModTapCommand(sender as? UIKeyCommand)
         NotificationCenter.default.post(name: .openSettings, object: self)

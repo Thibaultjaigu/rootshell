@@ -207,6 +207,10 @@ extension UIApplication {
         ghostty_postNotification(.equalizeSplits)
     }
 
+    @objc func menuChooseTmuxPaneToZoom(_ sender: Any?) {
+        ghostty_postNotification(.chooseTmuxPaneToZoom)
+    }
+
     @objc func menuOpenSettings(_ sender: Any?) {
         ghostty_postNotification(
             .openSettings,
