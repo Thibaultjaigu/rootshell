@@ -1313,6 +1313,23 @@ final class TmuxController {
         }
     }
 
+    /// Commit a native divider's movement against the server topology, not the
+    /// binary grouping used by the UI. A missing boundary means the topology
+    /// changed during the gesture; restore its authoritative projection.
+    func requestResizeDivider(windowID: Int, horizontal: Bool,
+                              leftPaneIDs: [Int], rightPaneIDs: [Int], delta: Int) {
+        guard isActive, let tab = windowTabs[windowID], !tab.paneMove.isPending,
+              let layout = appliedLayout(for: windowID) else { return }
+        guard let target = TmuxDividerResize.target(in: layout, horizontal: horizontal,
+                                                   leftPaneIDs: leftPaneIDs, rightPaneIDs: rightPaneIDs,
+                                                   delta: delta),
+              let pane = paneViews[target.paneID], pane.tmuxPaneBinding?.windowId == windowID else {
+            _ = setLayout(windowId: windowID, layout: layout, zoomedPaneId: nil)
+            return
+        }
+        pane.requestTmuxResizePane(horizontal: horizontal, cells: target.size)
+    }
+
     private func appliedLayout(for windowID: Int) -> TmuxLayoutNode? {
         guard let ops = lastAppliedTopologyOps else { return nil }
         for case let .setLayout(id, layout, _) in ops where id == windowID {
@@ -4491,7 +4508,7 @@ extension Ghostty.TerminalView {
         guard let controller = TmuxController.controller(forOwnerSurface: binding.parentSurface),
               controller.isActive else { return }
         let flag = horizontal ? "-x" : "-y"
-        sendTmuxCommand("resize-pane -t %\(binding.paneId) \(flag) \(cells)\n", to: binding.parentSurface)
+        sendTmuxCommand("resize-pane -t @\(binding.windowId).%\(binding.paneId) \(flag) \(cells)\n", to: binding.parentSurface)
     }
 
     /// Toggle tmux's pane zoom for this pane's window. The layout round-trips

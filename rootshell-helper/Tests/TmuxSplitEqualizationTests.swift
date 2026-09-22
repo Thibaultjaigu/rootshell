@@ -142,6 +142,35 @@ final class TmuxSplitEqualizationTests: XCTestCase {
             .split(separator: "\n").map(String.init).sorted()
     }
 
+    func testInnerDividerDragInThreeColumnsAndRowsPreservesOuterPane() throws {
+        for horizontal in [true, false] {
+            let server = try Server()
+            defer { server.stop() }
+            let flag = horizontal ? "-h" : "-v"
+            try server.cli(["split-window", flag, "-t", "%0"])
+            try server.cli(["split-window", flag, "-t", "%1"])
+            let control = try server.attach()
+            defer { control.stop() }
+            let before = try XCTUnwrap(TmuxLayoutNode.parseServerLayout(
+                control.command("display-message -p -t @0 '#{window_layout}'")))
+            let target = try XCTUnwrap(TmuxDividerResize.target(in: before, horizontal: horizontal,
+                                       leftPaneIDs: [1], rightPaneIDs: [2], delta: 3))
+            try control.command("resize-pane -t @0.%\(target.paneID) \(horizontal ? "-x" : "-y") \(target.size)")
+            let after = try XCTUnwrap(TmuxLayoutNode.parseServerLayout(
+                control.command("display-message -p -t @0 '#{window_layout}'")))
+            guard case let .split(_, beforeChildren, _, _, _, _) = before,
+                  case let .split(_, afterChildren, _, _, _, _) = after else {
+                return XCTFail("Expected three server siblings")
+            }
+            XCTAssertEqual(beforeChildren[0], afterChildren[0])
+            XCTAssertTrue(before.hasSameTopology(as: after))
+            XCTAssertEqual(horizontal ? afterChildren[1].width : afterChildren[1].height, target.size)
+            XCTAssertEqual(horizontal ? afterChildren[2].width : afterChildren[2].height,
+                           (horizontal ? beforeChildren[2].width : beforeChildren[2].height) - 3)
+            XCTAssertEqual(try control.command("display-message -p divider-replies-aligned"), "divider-replies-aligned")
+        }
+    }
+
     @MainActor
     private final class Server {
         let executable: String
