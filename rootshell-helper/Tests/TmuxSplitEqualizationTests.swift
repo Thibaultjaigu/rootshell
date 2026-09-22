@@ -16,7 +16,7 @@ final class TmuxSplitEqualizationTests: XCTestCase {
         let layout = try control.command("display-message -p -t @0 '#{window_layout}'")
         // Initially unzoomed, then a different zoomed pane, then the same pane.
         for paneID in [0, 2, 2, 1] {
-            try await TmuxPaneZoomSelection.zoom(windowID: 0, paneID: paneID) { command in
+            try await TmuxPaneZoomCommand.zoom(windowID: 0, paneID: paneID) { command in
                 try control.command(command)
             }
             XCTAssertEqual(try control.command("display-message -p -t @0 '#{window_zoomed_flag}:#{pane_id}'"), "1:%\(paneID)")
@@ -28,7 +28,7 @@ final class TmuxSplitEqualizationTests: XCTestCase {
         // A stable ID moved to a different window must not be followed there.
         try server.cli(["join-pane", "-s", "@0.%2", "-t", "@1"])
         do {
-            try await TmuxPaneZoomSelection.zoom(windowID: 0, paneID: 2) { try control.command($0) }
+            try await TmuxPaneZoomCommand.zoom(windowID: 0, paneID: 2) { try control.command($0) }
             XCTFail("A moved pane must not be followed into another window")
         } catch { /* tmux rejects the window-qualified stale target */ }
         XCTAssertEqual(try control.command("display-message -p -t @1 '#{window_zoomed_flag}'"), "0")

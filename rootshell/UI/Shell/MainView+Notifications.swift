@@ -230,11 +230,16 @@ extension MainView {
             self.equalizeSplits()
         }
 
-        observerBag.observeOnMainActor(.chooseTmuxPaneToZoom) { [self] notification in
+        observerBag.observeOnMainActor(.choosePaneToZoom) { [self] notification in
             guard self.shouldHandleNotification(notification),
                   !isAnySheetPresented,
                   terminals.indices.contains(selectedTabIndex) else { return }
-            terminals[selectedTabIndex].focusedPane?.enclosingSplitHost?.showTmuxPaneZoomPicker()
+            let tab = terminals[selectedTabIndex]
+            // The remembered focus can be a hidden/detached pane while zoom
+            // or menu focus is settling. Any mounted leaf identifies the host.
+            let host = tab.focusedPane?.enclosingSplitHost
+                ?? tab.splitTree.terminalLeaves.compactMap(\.enclosingSplitHost).first
+            host?.showPaneZoomPicker()
         }
 
         observerBag.observeOnMainActor(.focusSplit) { [self] notification in

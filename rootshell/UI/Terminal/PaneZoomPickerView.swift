@@ -1,19 +1,21 @@
 import UIKit
 
 /// Takes keyboard focus while choosing. It never forwards input to a terminal.
-/// The host supplies full-tree rectangles even when tmux is currently zoomed.
-final class TmuxPaneZoomPickerView: UIView, UIKeyInput {
-    private var selection: TmuxPaneZoomSelection
+/// The host supplies full-tree rectangles even when the server is currently zoomed.
+final class PaneZoomPickerView: UIView, UIKeyInput {
+    private var selection: PaneZoomSelection<UUID>
     private let buttons: [UIButton]
+    private let shortcuts: [KeyTrigger]
     private let instruction = UILabel()
     private var heldKeys = Set<UIKeyboardHIDUsage>()
-    private var pendingResult: TmuxPaneZoomSelection.Result = .pending
+    private var pendingResult: PaneZoomSelection<UUID>.Result = .pending
     private var lastInput: (text: String, modified: Bool, time: TimeInterval)?
     private var finishScheduled = false
-    var onFinish: ((Int?) -> Void)?
+    var onFinish: ((UUID?) -> Void)?
 
-    init(selection: TmuxPaneZoomSelection, titles: [String], preview: Bool) {
+    init(selection: PaneZoomSelection<UUID>, titles: [String], preview: Bool, shortcuts: [KeyTrigger]) {
         self.selection = selection
+        self.shortcuts = shortcuts
         buttons = selection.labels.enumerated().map { index, label in
             let button = UIButton(type: .system)
             button.tag = index
@@ -59,8 +61,9 @@ final class TmuxPaneZoomPickerView: UIView, UIKeyInput {
         }
         return resigned
     }
-    // Do not walk into the terminal/split host's key command handlers.
-    override var next: UIResponder? { nil }
+    // Keep UIKit's responder chain intact so becomeFirstResponder can find
+    // the window. Input is contained by our key commands and presses methods;
+    // severing `next` makes UIKit refuse keyboard focus on iPad.
     override var inputView: UIView? { UIView(frame: .zero) }
     var hasText: Bool { false }
 
@@ -77,8 +80,8 @@ final class TmuxPaneZoomPickerView: UIView, UIKeyInput {
     /// to the OS and the host cancels on scene deactivation.
     override var keyCommands: [UIKeyCommand]? {
         var seen = Set<KeyTrigger>()
-        var commands = KeybindManager.shared.activeBindings.compactMap { binding -> UIKeyCommand? in
-            guard let trigger = binding.sequence.first, seen.insert(trigger).inserted else { return nil }
+        var commands = shortcuts.compactMap { trigger -> UIKeyCommand? in
+            guard seen.insert(trigger).inserted else { return nil }
             let command = UIKeyCommand(input: trigger.uiKeyInput,
                                        modifierFlags: trigger.uiModifierFlags,
                                        action: #selector(consumeCommand(_:)))
@@ -102,7 +105,15 @@ final class TmuxPaneZoomPickerView: UIView, UIKeyInput {
 
     override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
         for press in presses {
-            guard let key = press.key else { cancel(); continue }
+            guard let key = press.key else { continue }
+            // UIKit can replay modifier state to a newly focused input view.
+            // Only a key chord's actual input should select or cancel.
+            switch key.keyCode {
+            case .keyboardLeftShift, .keyboardRightShift, .keyboardLeftControl, .keyboardRightControl,
+                 .keyboardLeftAlt, .keyboardRightAlt, .keyboardLeftGUI, .keyboardRightGUI, .keyboardCapsLock:
+                continue
+            default: break
+            }
             // Repeats of a held digit must not become a second digit in a label.
             guard heldKeys.insert(key.keyCode).inserted else { continue }
             let modifiers = key.modifierFlags.intersection([.command, .control, .alternate, .shift])
@@ -116,8 +127,14 @@ final class TmuxPaneZoomPickerView: UIView, UIKeyInput {
     }
 
     override func pressesCancelled(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
-        heldKeys.removeAll()
-        cancel()
+        // Focus handoff may cancel the opening shortcut's old press sequence.
+        // That sequence never began in this picker and must not dismiss it.
+        let ownedPressWasCancelled = presses.contains { press in
+            press.key.map { heldKeys.contains($0.keyCode) } ?? false
+        }
+        for press in presses { if let key = press.key { heldKeys.remove(key.keyCode) } }
+        if ownedPressWasCancelled { cancel() }
+        else { finishIfReady() }
     }
 
     func insertText(_ text: String) { consume(text, modified: false) }

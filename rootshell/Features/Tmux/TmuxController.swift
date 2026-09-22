@@ -1333,13 +1333,13 @@ final class TmuxController {
                   (self.modelContainingTab(id: tab.id) ?? self.tabsModel).selectedTabID == tab.id
             else { return }
             do {
-                try await TmuxPaneZoomSelection.zoom(windowID: windowID, paneID: paneID) { command in
+                try await TmuxPaneZoomCommand.zoom(windowID: windowID, paneID: paneID) { command in
                     guard self.isActive, self.windowTabs[windowID] === tab,
                           !tab.paneMove.isPending,
                           self.appliedLayout(for: windowID)?.hasSameTopology(as: layout) == true,
                           pane.tmuxPaneBinding?.windowId == windowID,
                           (self.modelContainingTab(id: tab.id) ?? self.tabsModel).selectedTabID == tab.id
-                    else { throw TmuxPaneZoomSelection.Failure.layoutChanged }
+                    else { throw TmuxPaneZoomCommand.Failure.layoutChanged }
                     return try await self.sendCommandWithReply(command)
                 }
                 guard self.isActive, self.windowTabs[windowID] === tab,

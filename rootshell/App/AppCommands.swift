@@ -15,14 +15,14 @@ import Combine
 
 // MARK: - Keyboard Shortcut State
 
-private struct CanChooseTmuxPaneToZoomKey: FocusedValueKey {
+private struct CanChoosePaneToZoomKey: FocusedValueKey {
     typealias Value = Bool
 }
 
 extension FocusedValues {
-    var canChooseTmuxPaneToZoom: Bool? {
-        get { self[CanChooseTmuxPaneToZoomKey.self] }
-        set { self[CanChooseTmuxPaneToZoomKey.self] = newValue }
+    var canChoosePaneToZoom: Bool? {
+        get { self[CanChoosePaneToZoomKey.self] }
+        set { self[CanChoosePaneToZoomKey.self] = newValue }
     }
 }
 
@@ -401,7 +401,7 @@ struct AppViewCommands: Commands {
 
 struct TerminalCommands: Commands {
     @ObservedObject var shortcutState: MenuShortcutState
-    @FocusedValue(\.canChooseTmuxPaneToZoom) private var canChoosePaneToZoom
+    @FocusedValue(\.canChoosePaneToZoom) private var canChoosePaneToZoom
 
     var body: some Commands {
         CommandMenu("Terminal") {
@@ -480,10 +480,10 @@ struct TerminalCommands: Commands {
 
             Button("Choose Pane to Zoom") {
                 UIApplication.shared.sendMenuAction(
-                    #selector(Ghostty.TerminalView.menuChooseTmuxPaneToZoom(_:)), from: nil
+                    #selector(Ghostty.TerminalView.menuChoosePaneToZoom(_:)), from: nil
                 )
             }
-            .modifier(DynamicShortcut(action: .choose_tmux_pane_to_zoom, shortcuts: shortcutState.shortcuts))
+            .modifier(DynamicShortcut(action: .choose_pane_to_zoom, shortcuts: shortcutState.shortcuts))
             .disabled(canChoosePaneToZoom != true)
 
             Divider()
