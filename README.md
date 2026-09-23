@@ -183,7 +183,7 @@ See the [herdr control mode guide](docs/herdr-control-mode.md) for setup, the fo
 
 ### AI Integration
 - **AI Agent** - Built-in assistant accessible via ⌘I in SSH sessions
-  - Providers: Anthropic Claude, OpenAI, Google Gemini, OpenRouter, AWS Bedrock
+  - Providers: Anthropic Claude, OpenAI, Google Gemini, OpenRouter, Requesty, AWS Bedrock
   - Web search and page fetch tools
   - Thinking model support with extended reasoning
 - **Voice Agent** - Real-time bidirectional voice conversation powered by Google Gemini Flash via WebSocket with sub-second latency. Reads terminal scrollback, types keystrokes, pastes text, and executes commands hands-free. Floating bubble overlay with live transcript, tool approval cards, three approval modes, and 30-voice selection

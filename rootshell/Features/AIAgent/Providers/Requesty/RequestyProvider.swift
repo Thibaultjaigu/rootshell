@@ -639,11 +639,11 @@ final class RequestyProvider: AIProvider {
 
         logger.info("Discovered \(managed.count) Requesty managed policies and \(catalog.count) catalog models")
 
-        let managedModels = managed.filter(\.isChatModel)
+        let managedModels = managed.filter { $0.isChatModel }
             .map { AIProviderModel.requestyModel(from: $0, isManagedPolicy: true) }
             .sorted { $0.displayName < $1.displayName }
         let managedIDs = Set(managedModels.map(\.id))
-        let catalogModels = catalog.filter(\.isChatModel)
+        let catalogModels = catalog.filter { $0.isChatModel }
             .map { AIProviderModel.requestyModel(from: $0, isManagedPolicy: false) }
             .filter { !managedIDs.contains($0.id) }
             .sorted { $0.displayName < $1.displayName }

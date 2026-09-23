@@ -602,7 +602,7 @@ extension AIProviderModel {
     /// Prefix for internal Requesty model IDs. Requesty and OpenRouter share the
     /// "vendor/model" naming, and managed policy IDs such as "claude-sonnet-4-5"
     /// can match direct API IDs, so the prefix keeps provider lookup unambiguous.
-    static let requestyModelIDPrefix = "requesty:"
+    nonisolated static let requestyModelIDPrefix = "requesty:"
 
     /// Create a model from a Requesty API response
     static func requestyModel(from apiModel: RequestyAPIModel, isManagedPolicy: Bool) -> AIProviderModel {
@@ -621,8 +621,9 @@ extension AIProviderModel {
         )
     }
 
-    /// Model ID sent to the Requesty API ("requesty:openai/gpt-4o-mini" -> "openai/gpt-4o-mini")
-    static func requestyAPIModelID(for modelId: String) -> String {
+    /// Model ID sent to the Requesty API ("requesty:openai/gpt-4o-mini" -> "openai/gpt-4o-mini").
+    /// Nonisolated because RequestyProvider's nonisolated error mapping calls it.
+    nonisolated static func requestyAPIModelID(for modelId: String) -> String {
         guard modelId.hasPrefix(requestyModelIDPrefix) else { return modelId }
         return String(modelId.dropFirst(requestyModelIDPrefix.count))
     }

@@ -34,10 +34,12 @@ private struct CachedModelData: Equatable {
     var hasBedrock = false
     var hasGoogle = false
     var hasOpenRouter = false
+    var hasRequesty = false
     var chatgptModels: [AIProviderModel] = []
     /// Discovery records carrying each ChatGPT model's effort ladder + default.
     var chatgptReasoning: [CachedChatGPTModel] = []
     var openRouterModels: [AIProviderModel] = []
+    var requestyModels: [AIProviderModel] = []
     var customProviders: [CachedCustomProvider] = []
     var displayNames: [String: String] = [:]
 }
@@ -429,6 +431,8 @@ struct AIAgentOverlayView: View {
         cachedModels.hasGoogle = cm.hasGoogleAPIKey
         cachedModels.hasOpenRouter = cm.hasOpenRouterAPIKey && !cm.openRouterFavoriteModels.isEmpty
         cachedModels.openRouterModels = cm.openRouterFavoriteModels
+        cachedModels.hasRequesty = cm.hasRequestyAPIKey && !cm.requestyFavoriteModels.isEmpty
+        cachedModels.requestyModels = cm.requestyFavoriteModels
         // No API-key requirement: local endpoints are routinely unauthenticated, and gating on a
         // key made them vanish from the picker instead of failing visibly.
         cachedModels.customProviders = cm.customProviders
@@ -443,6 +447,7 @@ struct AIAgentOverlayView: View {
         AIProviderModel.bedrockModels.forEach { names[$0.id] = $0.displayName }
         AIProviderModel.googleModels.forEach { names[$0.id] = $0.displayName }
         cachedModels.openRouterModels.forEach { names[$0.id] = $0.displayName }
+        cachedModels.requestyModels.forEach { names[$0.id] = $0.displayName }
         cachedModels.customProviders.forEach { provider in
             provider.models.forEach { names[$0.id] = $0.displayName }
         }
@@ -501,6 +506,7 @@ struct AIAgentOverlayView: View {
         if let m = AIProviderModel.bedrockModel(id: selectedModelID) { return m }
         if let m = AIProviderModel.googleModel(id: selectedModelID) { return m }
         if let m = cachedModels.openRouterModels.first(where: { $0.id == selectedModelID }) { return m }
+        if let m = cachedModels.requestyModels.first(where: { $0.id == selectedModelID }) { return m }
         for provider in cachedModels.customProviders {
             if let m = provider.models.first(where: { $0.id == selectedModelID }) { return m }
         }
@@ -932,6 +938,14 @@ private struct AIAgentModelPickerToolbar: View, Equatable {
             }
         }
 
+        if cachedModels.hasRequesty {
+            Section(header: Text("Requesty")) {
+                ForEach(cachedModels.requestyModels) { model in
+                    Text(model.displayName).tag(model.id)
+                }
+            }
+        }
+
         ForEach(cachedModels.customProviders, id: \.name) { provider in
             Section(header: Text(provider.name)) {
                 ForEach(provider.models) { model in
@@ -953,6 +967,7 @@ private struct AIAgentModelPickerToolbar: View, Equatable {
         cachedModels.hasAnthropic ||
         cachedModels.hasBedrock ||
         cachedModels.hasGoogle || cachedModels.hasOpenRouter ||
+        cachedModels.hasRequesty ||
         !cachedModels.customProviders.isEmpty
     }
 
@@ -976,6 +991,9 @@ private struct AIAgentModelPickerToolbar: View, Equatable {
         }
         if cachedModels.hasOpenRouter {
             sections.append(("OpenRouter", cachedModels.openRouterModels))
+        }
+        if cachedModels.hasRequesty {
+            sections.append(("Requesty", cachedModels.requestyModels))
         }
 
         cachedModels.customProviders.forEach { provider in

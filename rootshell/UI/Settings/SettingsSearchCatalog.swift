@@ -921,6 +921,8 @@ struct SettingsSearchEntry: Identifiable, Hashable {
                 keywords: ["google", "gemini", "api key", "temperature", "models"]),
             row("ai-openrouter", String(localized: "OpenRouter"), in: .aiConfiguration,
                 keywords: ["api key", "models", "free models", "provider", "tier"]),
+            row("ai-requesty", String(localized: "Requesty"), in: .aiConfiguration,
+                keywords: ["api key", "models", "managed policies", "provider", "tier"]),
             row("ai-custom-providers", String(localized: "Custom AI Providers"), in: .aiConfiguration, icon: "plus",
                 keywords: ["custom provider", "ollama", "openai-compatible", "endpoint", "local model", "add model"]),
             row("ai-web-search", String(localized: "Enable Web Search"), in: .aiConfiguration, icon: "magnifyingglass",

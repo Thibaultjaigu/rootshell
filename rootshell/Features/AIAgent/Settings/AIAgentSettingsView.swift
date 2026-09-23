@@ -107,6 +107,18 @@ struct AIAgentSettingsView: View {
                 )
             }
             .themedRow()
+
+            NavigationLink {
+                RequestyProviderDetailView()
+            } label: {
+                AIProviderRow(
+                    name: "Requesty",
+                    isConfigured: credentialsManager.hasRequestyAPIKey,
+                    modelCount: credentialsManager.requestyFavoriteModels.count,
+                    imageName: "RequestyLogo"
+                )
+            }
+            .themedRow()
         }
     }
 
