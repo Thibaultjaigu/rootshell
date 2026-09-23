@@ -587,7 +587,14 @@ extension MainView {
             // empty state with no way to connect (no tab bar + button to tap).
             if terminals.isEmpty && tabBarHidden {
                 Ghostty.logger.info("Sheet dismissed with no terminals (tab bar hidden) - re-showing")
+                pendingFileManagerOpen = nil
                 showConnectionSidebar = true
+                return
+            }
+
+            // A Files-tab choice takes focus instead of the terminal.
+            if pendingFileManagerOpen != nil {
+                if !connectionViewIsSheet { flushPendingFileManagerOpen() }
                 return
             }
 

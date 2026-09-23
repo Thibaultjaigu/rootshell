@@ -55,12 +55,6 @@ extension MainView {
     }
 
     func openFileManager() {
-        // Floating tools yield first, as they do for Open in Folder.
-        showThemePickerOverlay = false
-        showClipboardManager = false
-        showQuickSettingsOverlay = false
-        showOpenInFolderOverlay = false
-
         let model = fileManagerModel ?? makeFileManagerModel()
         fileManagerModel = model
         if let terminal = focusedTerminalForFileManager {
@@ -68,6 +62,42 @@ extension MainView {
             let directory = terminal.pwd.flatMap { $0.hasPrefix("/") ? $0 : nil }
             model.present(from: source, directory: directory)
         }
+        revealFileManager(model)
+    }
+
+    /// Opens (or retargets) the manager on `endpoint`, reusing a pane already on that file system.
+    func openFileManager(at endpoint: SFTPEndpoint, presentation: FileManagerPresentation?) {
+        let model = fileManagerModel ?? makeFileManagerModel()
+        fileManagerModel = model
+        if let existing = [model.left, model.right].first(where: { $0.endpoint.sharesFileSystem(with: endpoint) }) {
+            model.activeSide = existing.id
+        } else {
+            let side: FilePaneModel.Side = endpoint.isLocal ? .left : .right
+            model.pane(side).connect(to: endpoint)
+            model.activeSide = side
+        }
+
+        if let presentation, !isPhone, presentation != fileManagerPresentation {
+            if showFileManager {
+                switchFileManagerPresentation(presentation)
+                return
+            }
+            fileManagerPresentation = presentation
+            SettingsStore.shared.set(Settings.Transfer.fileManagerPresentation, presentation)
+        }
+        if showFileManager {
+            model.requestFocus()
+        } else {
+            revealFileManager(model)
+        }
+    }
+
+    private func revealFileManager(_ model: FileManagerModel) {
+        // Floating tools yield first, as they do for Open in Folder.
+        showThemePickerOverlay = false
+        showClipboardManager = false
+        showQuickSettingsOverlay = false
+        showOpenInFolderOverlay = false
 
         if isPhone {
             resignFirstResponderForSheetPresentation()

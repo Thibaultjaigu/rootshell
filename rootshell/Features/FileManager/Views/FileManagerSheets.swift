@@ -9,6 +9,49 @@
 
 import SwiftUI
 
+// MARK: - Locations
+
+/// A place the file manager can open: this device, the origin pane's session, or an SSH profile.
+struct FileManagerLocation: Identifiable {
+    let id: String
+    let endpoint: SFTPEndpoint
+    let title: String
+    let detail: String?
+    let symbol: String
+
+    static func all(origin: SFTPEndpoint.PaneSource?) -> [FileManagerLocation] {
+        var result: [FileManagerLocation] = [
+            FileManagerLocation(id: "local", endpoint: .local, title: SFTPEndpoint.local.displayName, detail: nil, symbol: "internaldrive"),
+        ]
+        if let origin, origin.terminal != nil, !SFTPEndpoint.pane(origin).isLocal {
+            result.append(FileManagerLocation(
+                id: "pane", endpoint: .pane(origin), title: origin.displayName,
+                detail: String(localized: "Current terminal connection", comment: "File manager location picker: reuse the pane's session"),
+                symbol: "rectangle.connected.to.line.below"
+            ))
+        }
+        let profiles = ConnectionProfileManager.shared.profiles
+            .filter { !$0.isDeleted && $0.isSSHBased && $0.isAvailableOnCurrentPlatform }
+            .sorted { ($0.lastUsedAt ?? .distantPast) > ($1.lastUsedAt ?? .distantPast) }
+        for profile in profiles {
+            let host = "\(profile.sshConfig.username)@\(profile.sshConfig.host)"
+            let via = profile.sshConfig.jumpHost.map { String(localized: " via \($0.host)", comment: "File manager location picker: jump host suffix") } ?? ""
+            let transport = profile.connectionProtocol == .trzsz ? " · tssh" : ""
+            result.append(FileManagerLocation(
+                id: profile.id.uuidString, endpoint: .profile(profile.id), title: profile.name,
+                detail: host + via + transport, symbol: profile.iconName ?? profile.connectionProtocol.iconName
+            ))
+        }
+        return result
+    }
+
+    func matches(_ query: String) -> Bool {
+        let trimmed = query.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return true }
+        return title.localizedCaseInsensitiveContains(trimmed) || (detail?.localizedCaseInsensitiveContains(trimmed) ?? false)
+    }
+}
+
 // MARK: - Location picker
 
 struct EndpointPickerSheet: View {
@@ -22,42 +65,8 @@ struct EndpointPickerSheet: View {
     @State private var arrowRepeat = ArrowKeyRepeatManager()
     @Environment(\.sheetThemeColors) private var sheetThemeColors
 
-    private struct Choice: Identifiable {
-        let id: String
-        let endpoint: SFTPEndpoint
-        let title: String
-        let detail: String?
-        let symbol: String
-    }
-
-    private var choices: [Choice] {
-        var result: [Choice] = [
-            Choice(id: "local", endpoint: .local, title: SFTPEndpoint.local.displayName, detail: nil, symbol: "internaldrive"),
-        ]
-        if let origin = manager.originPane, origin.terminal != nil, !SFTPEndpoint.pane(origin).isLocal {
-            result.append(Choice(
-                id: "pane", endpoint: .pane(origin), title: origin.displayName,
-                detail: String(localized: "Current terminal connection", comment: "File manager location picker: reuse the pane's session"),
-                symbol: "rectangle.connected.to.line.below"
-            ))
-        }
-        let profiles = ConnectionProfileManager.shared.profiles
-            .filter { !$0.isDeleted && $0.isSSHBased && $0.isAvailableOnCurrentPlatform }
-            .sorted { ($0.lastUsedAt ?? .distantPast) > ($1.lastUsedAt ?? .distantPast) }
-        for profile in profiles {
-            let host = "\(profile.sshConfig.username)@\(profile.sshConfig.host)"
-            let via = profile.sshConfig.jumpHost.map { String(localized: " via \($0.host)", comment: "File manager location picker: jump host suffix") } ?? ""
-            let transport = profile.connectionProtocol == .trzsz ? " · tssh" : ""
-            result.append(Choice(
-                id: profile.id.uuidString, endpoint: .profile(profile.id), title: profile.name,
-                detail: host + via + transport, symbol: profile.iconName ?? profile.connectionProtocol.iconName
-            ))
-        }
-        let trimmed = query.trimmingCharacters(in: .whitespaces)
-        guard !trimmed.isEmpty else { return result }
-        return result.filter {
-            $0.title.localizedCaseInsensitiveContains(trimmed) || ($0.detail?.localizedCaseInsensitiveContains(trimmed) ?? false)
-        }
+    private var choices: [FileManagerLocation] {
+        FileManagerLocation.all(origin: manager.originPane).filter { $0.matches(query) }
     }
 
     var body: some View {
@@ -136,7 +145,7 @@ struct EndpointPickerSheet: View {
         arrowRepeat.start(direction: direction, action: step)
     }
 
-    private func choose(_ choice: Choice) {
+    private func choose(_ choice: FileManagerLocation) {
         arrowRepeat.stop()
         manager.pane(side).connect(to: choice.endpoint)
         manager.activeSide = side

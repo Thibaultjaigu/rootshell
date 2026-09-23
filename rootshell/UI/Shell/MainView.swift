@@ -301,6 +301,8 @@ struct MainView: View {
     /// Live width during a drag; persisted only on commit, like the AI sidebar's.
     @State var fileManagerSidebarWidth: CGFloat = CGFloat(SettingsStore.shared.value(Settings.Transfer.fileManagerSidebarWidth))
     @State var fileManagerSidebarIsDragging = false
+    /// A Files-tab choice waiting for the connection sheet to finish dismissing.
+    @State var pendingFileManagerOpen: (endpoint: SFTPEndpoint, presentation: FileManagerPresentation?)?
 
     // Clipboard manager overlay state
     @State var showClipboardManager = false

@@ -322,6 +322,7 @@ extension MainView {
                 themeColors: sheetTheme.themeColors,
                 accentColor: sheetTheme.accentColor,
                 colorScheme: sheetTheme.colorScheme,
+                onSheetDismiss: { flushPendingFileManagerOpen() },
                 phoneContent: { connectionSheetContentForPhone },
                 // Same SidePanelOverlay re-hosting as the tab sidebar above:
                 // inject so @EnvironmentObject reads under this overlay can
