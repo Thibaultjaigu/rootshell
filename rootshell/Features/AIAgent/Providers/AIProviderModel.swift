@@ -37,6 +37,7 @@ struct AIProviderModel: Identifiable, Codable, Sendable, Hashable {
         case bedrock        // Anthropic models served via AWS Bedrock
         case google         // Built-in Google Gemini models
         case openRouter     // OpenRouter models (discovered from API)
+        case requesty       // Requesty models (discovered from API)
         case customEndpoint // Discovered from custom endpoint
         case manual         // Manually entered by user
     }
@@ -192,6 +193,7 @@ extension AIProviderModel.ModelSource {
         case .bedrock: return "AWS Bedrock"
         case .google: return "Google"
         case .openRouter: return "OpenRouter"
+        case .requesty: return "Requesty"
         case .customEndpoint: return "Custom"
         case .manual: return "Custom"
         }
@@ -205,8 +207,9 @@ extension AIProviderModel.ModelSource {
         case .bedrock: return 3
         case .google: return 4
         case .openRouter: return 5
-        case .customEndpoint: return 6
-        case .manual: return 7
+        case .requesty: return 6
+        case .customEndpoint: return 7
+        case .manual: return 8
         }
     }
 }
@@ -590,6 +593,71 @@ extension AIProviderModel {
     static func openRouterProviderSlug(for modelId: String) -> String? {
         guard let slashIndex = modelId.firstIndex(of: "/") else { return nil }
         return String(modelId[..<slashIndex])
+    }
+}
+
+// MARK: - Requesty Models
+
+extension AIProviderModel {
+    /// Prefix for internal Requesty model IDs. Requesty and OpenRouter share the
+    /// "vendor/model" naming, and managed policy IDs such as "claude-sonnet-4-5"
+    /// can match direct API IDs, so the prefix keeps provider lookup unambiguous.
+    static let requestyModelIDPrefix = "requesty:"
+
+    /// Create a model from a Requesty API response
+    static func requestyModel(from apiModel: RequestyAPIModel, isManagedPolicy: Bool) -> AIProviderModel {
+        let maxOutput = apiModel.max_output_tokens.flatMap { $0 > 0 ? $0 : nil }
+        return AIProviderModel(
+            id: requestyModelIDPrefix + apiModel.id,
+            displayName: apiModel.id,
+            description: formatRequestyDescription(apiModel, isManagedPolicy: isManagedPolicy),
+            tier: inferOpenRouterTier(contextLength: apiModel.context_window),
+            supportsTools: apiModel.supports_tool_calling ?? true,
+            supportsTemperature: true,
+            supportsThinking: false,
+            source: .requesty,
+            maxCompletionTokens: maxOutput,
+            contextWindowTokens: apiModel.context_window
+        )
+    }
+
+    /// Model ID sent to the Requesty API ("requesty:openai/gpt-4o-mini" -> "openai/gpt-4o-mini")
+    static func requestyAPIModelID(for modelId: String) -> String {
+        guard modelId.hasPrefix(requestyModelIDPrefix) else { return modelId }
+        return String(modelId.dropFirst(requestyModelIDPrefix.count))
+    }
+
+    /// Managed policy IDs have no vendor prefix ("claude-sonnet-4-5" vs "anthropic/claude-sonnet-4-5")
+    static func isRequestyManagedPolicy(_ modelId: String) -> Bool {
+        !requestyAPIModelID(for: modelId).contains("/")
+    }
+
+    /// Get the provider slug from a Requesty model ID (nil for managed policies)
+    static func requestyProviderSlug(for modelId: String) -> String? {
+        openRouterProviderSlug(for: requestyAPIModelID(for: modelId))
+    }
+
+    /// Format description from Requesty model info
+    private static func formatRequestyDescription(_ model: RequestyAPIModel, isManagedPolicy: Bool) -> String {
+        var parts: [String] = []
+
+        if isManagedPolicy {
+            parts.append("Managed policy")
+        }
+
+        if let ctx = model.context_window, ctx > 0 {
+            parts.append("\(ctx / 1000)K context")
+        }
+
+        if !isManagedPolicy, let desc = model.description, !desc.isEmpty {
+            let truncated = desc.prefix(60)
+            if truncated.count < desc.count {
+                return String(truncated) + "..."
+            }
+            return desc
+        }
+
+        return parts.isEmpty ? "Requesty model" : parts.joined(separator: " · ")
     }
 }
 #endif

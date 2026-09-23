@@ -357,7 +357,7 @@ enum BackupExporter {
         // restored refresh token may have been rotated by another device, in
         // which case first use fails with invalid_grant and the UI shows
         // signed-out.
-        let accountNames = ["anthropic", "google", "openai", "openrouter", "chatgpt-codex"]
+        let accountNames = ["anthropic", "google", "openai", "openrouter", "requesty", "chatgpt-codex"]
 
         for name in accountNames {
             if let key = credManager.loadAPIKey(for: name) {

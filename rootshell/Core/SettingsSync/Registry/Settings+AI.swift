@@ -64,6 +64,12 @@ nonisolated extension Settings {
         static let openRouterDiscoveredModels = SettingKey<Data?>(
             "ai.openrouter.discoveredModels", default: nil, group: .ai, policy: .deviceOnly,
             title: String(localized: "OpenRouter Model Cache", comment: "Setting title"))
+        static let requestyFavorites = SettingKey(
+            "ai.requesty.favorites", default: [String](), group: .ai, configKey: "ai-requesty-favorites",
+            title: String(localized: "Requesty Favorites", comment: "Setting title"))
+        static let requestyDiscoveredModels = SettingKey<Data?>(
+            "ai.requesty.discoveredModels", default: nil, group: .ai, policy: .deviceOnly,
+            title: String(localized: "Requesty Model Cache", comment: "Setting title"))
         static let chatGPTModels = SettingKey<Data?>(
             "ai.chatgpt.models", default: nil, group: .ai, policy: .deviceOnly,
             title: String(localized: "ChatGPT Model Cache", comment: "Setting title"))
@@ -105,6 +111,7 @@ nonisolated extension Settings {
             textSize.erased, webSearchEnabled.erased, webSearchEngine.erased, commitMessageEnabled.erased,
             commitMessageModel.erased, bedrockRegion.erased, bedrockCloudAccountID.erased, openAIAuthMode.erased,
             customProviders.erased, openRouterFavorites.erased, openRouterDiscoveredModels.erased,
+            requestyFavorites.erased, requestyDiscoveredModels.erased,
             chatGPTModels.erased, chatGPTModelsRefreshDate, yoloModeLegacy.erased, fullscreenModeLegacy.erased,
             mcpServerConfig.erased, mcpAuthToken.erased, voiceConsultationMode.erased, voice.erased,
         ]

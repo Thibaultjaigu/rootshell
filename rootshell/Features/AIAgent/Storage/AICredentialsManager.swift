@@ -140,6 +140,8 @@ final class AICredentialsManager {
     private let googleAccount = "google"
     @ObservationIgnored
     private let openRouterAccount = "openrouter"
+    @ObservationIgnored
+    private let requestyAccount = "requesty"
 
     // Bedrock UserDefaults keys (no Keychain entry — credentials live in the
     // linked CloudAccount's existing Keychain record).
@@ -150,11 +152,16 @@ final class AICredentialsManager {
     @ObservationIgnored
     private let openRouterModelsKey = "ai.openrouter.discoveredModels"
 
+    // Requesty UserDefaults keys
+    @ObservationIgnored
+    private let requestyModelsKey = "ai.requesty.discoveredModels"
+
     /// Registered scalar keys this manager mirrors into its backing storage.
     @ObservationIgnored
     private static let storeKeyNames: Set<String> = [
         Settings.AI.globalSelectedModel.name, Settings.AI.approvalMode.name, Settings.AI.customProviders.name,
-        Settings.AI.openRouterFavorites.name, Settings.AI.webSearchEnabled.name, Settings.AI.webSearchEngine.name,
+        Settings.AI.openRouterFavorites.name, Settings.AI.requestyFavorites.name,
+        Settings.AI.webSearchEnabled.name, Settings.AI.webSearchEngine.name,
         Settings.AI.commitMessageEnabled.name, Settings.AI.commitMessageModel.name,
         Settings.AI.presentationMode.name, Settings.AI.sidebarWidth.name, Settings.AI.bedrockRegion.name,
     ]
@@ -204,6 +211,9 @@ final class AICredentialsManager {
     /// Tracks whether OpenRouter API key is configured (triggers view updates)
     private var _hasOpenRouterAPIKey: Bool = false
 
+    /// Tracks whether Requesty API key is configured (triggers view updates)
+    private var _hasRequestyAPIKey: Bool = false
+
     /// Which auth path the OpenAI slot uses.
     private var _openAIAuthMode: OpenAIAuthMode = .apiKey
 
@@ -216,6 +226,12 @@ final class AICredentialsManager {
 
     /// Full catalog of discovered OpenRouter models
     private var _openRouterDiscoveredModels: [AIProviderModel] = []
+
+    /// Requesty favorite model IDs (only these appear in main model picker)
+    private var _requestyFavoriteModelIDs: Set<String> = []
+
+    /// Full catalog of discovered Requesty models
+    private var _requestyDiscoveredModels: [AIProviderModel] = []
 
     /// Linked AWS Cloud account ID for the Bedrock provider. Nil = not configured.
     /// The actual AWS credentials live in the CloudAccount's Keychain record;
@@ -263,6 +279,15 @@ final class AICredentialsManager {
             _openRouterDiscoveredModels = models
         }
 
+        // Load Requesty favorites
+        _requestyFavoriteModelIDs = Set(store.get(Settings.AI.requestyFavorites))
+
+        // Load Requesty discovered models
+        if let data = UserDefaults.standard.data(forKey: requestyModelsKey),
+           let models = try? JSONDecoder().decode([AIProviderModel].self, from: data) {
+            _requestyDiscoveredModels = models
+        }
+
         // Load web search settings
         _webSearchEnabled = store.get(Settings.AI.webSearchEnabled)
         _defaultSearchEngine = store.get(Settings.AI.webSearchEngine).rawValue
@@ -293,6 +318,7 @@ final class AICredentialsManager {
         _hasAnthropicAPIKey = loadAPIKey(for: anthropicAccount) != nil
         _hasGoogleAPIKey = loadAPIKey(for: googleAccount) != nil
         _hasOpenRouterAPIKey = loadAPIKey(for: openRouterAccount) != nil
+        _hasRequestyAPIKey = loadAPIKey(for: requestyAccount) != nil
 
         // Bedrock state — pointer to a linked Cloud account, plus region override.
         if let stored = UserDefaults.standard.string(forKey: bedrockCloudAccountIDKey),
@@ -339,6 +365,9 @@ final class AICredentialsManager {
         if keys.contains(Settings.AI.openRouterFavorites.name) {
             _openRouterFavoriteModelIDs = Set(store.get(Settings.AI.openRouterFavorites))
         }
+        if keys.contains(Settings.AI.requestyFavorites.name) {
+            _requestyFavoriteModelIDs = Set(store.get(Settings.AI.requestyFavorites))
+        }
         if keys.contains(Settings.AI.webSearchEnabled.name) {
             _webSearchEnabled = store.get(Settings.AI.webSearchEnabled)
         }
@@ -383,6 +412,13 @@ final class AICredentialsManager {
             _openRouterDiscoveredModels = models
         }
 
+        _requestyFavoriteModelIDs = Set(store.get(Settings.AI.requestyFavorites))
+
+        if let data = UserDefaults.standard.data(forKey: requestyModelsKey),
+           let models = try? JSONDecoder().decode([AIProviderModel].self, from: data) {
+            _requestyDiscoveredModels = models
+        }
+
         _webSearchEnabled = store.get(Settings.AI.webSearchEnabled)
         _defaultSearchEngine = store.get(Settings.AI.webSearchEngine).rawValue
         _aiCommitMessageEnabled = store.get(Settings.AI.commitMessageEnabled)
@@ -397,6 +433,7 @@ final class AICredentialsManager {
         _hasAnthropicAPIKey = loadAPIKey(for: anthropicAccount) != nil
         _hasGoogleAPIKey = loadAPIKey(for: googleAccount) != nil
         _hasOpenRouterAPIKey = loadAPIKey(for: openRouterAccount) != nil
+        _hasRequestyAPIKey = loadAPIKey(for: requestyAccount) != nil
 
         // Reload Bedrock state too — backup restores can repopulate these.
         if let stored = UserDefaults.standard.string(forKey: bedrockCloudAccountIDKey),
@@ -915,6 +952,11 @@ final class AICredentialsManager {
             models.append(contentsOf: openRouterFavoriteModels)
         }
 
+        // Requesty FAVORITES only (not the full model catalog)
+        if hasRequestyAPIKey {
+            models.append(contentsOf: requestyFavoriteModels)
+        }
+
         // Custom provider models. No API-key requirement: local servers are routinely
         // unauthenticated, and gating on a key made them vanish from the picker while
         // `validatedSelectedModelID` silently re-pointed the selection elsewhere.
@@ -1139,6 +1181,59 @@ final class AICredentialsManager {
         _hasOpenRouterAPIKey
     }
 
+    // MARK: - Requesty API Key Storage
+
+    /// Saves the API key for Requesty.
+    /// See `saveAnthropicAPIKey` for the flag-before-keychain ordering rationale.
+    func saveRequestyAPIKey(_ apiKey: String, syncToiCloud: Bool = true) throws {
+        let previous = _hasRequestyAPIKey
+        _hasRequestyAPIKey = true
+        do {
+            try saveAPIKey(apiKey, for: requestyAccount, syncToiCloud: syncToiCloud)
+        } catch {
+            _hasRequestyAPIKey = previous
+            throw error
+        }
+    }
+
+    /// Loads the API key for Requesty
+    func loadRequestyAPIKey() -> String? {
+        loadAPIKey(for: requestyAccount)
+    }
+
+    /// Deletes the API key for Requesty.
+    /// Clears favorites and discovered models before the keychain delete, for the
+    /// same reason as `deleteOpenRouterAPIKey`. Reverts all state on keychain failure.
+    func deleteRequestyAPIKey() throws {
+        let previousFlag = _hasRequestyAPIKey
+        let previousFavorites = _requestyFavoriteModelIDs
+        let previousDiscovered = _requestyDiscoveredModels
+
+        _hasRequestyAPIKey = false
+        _requestyFavoriteModelIDs.removeAll()
+        _requestyDiscoveredModels.removeAll()
+        SettingsStore.shared.reset(Settings.AI.requestyFavorites)
+        UserDefaults.standard.removeObject(forKey: requestyModelsKey)
+
+        do {
+            try deleteAPIKey(for: requestyAccount)
+        } catch {
+            _hasRequestyAPIKey = previousFlag
+            _requestyFavoriteModelIDs = previousFavorites
+            _requestyDiscoveredModels = previousDiscovered
+            SettingsStore.shared.set(Settings.AI.requestyFavorites, Array(previousFavorites))
+            if let data = try? JSONEncoder().encode(previousDiscovered) {
+                UserDefaults.standard.set(data, forKey: requestyModelsKey)
+            }
+            throw error
+        }
+    }
+
+    /// Whether Requesty has an API key configured
+    var hasRequestyAPIKey: Bool {
+        _hasRequestyAPIKey
+    }
+
     // MARK: - Bedrock Configuration
 
     /// Linked AWS Cloud account ID for the Bedrock provider, or nil if Bedrock isn't configured.
@@ -1244,6 +1339,72 @@ final class AICredentialsManager {
         return slugs.sorted()
     }
 
+    // MARK: - Requesty Favorites
+
+    /// Requesty favorite model IDs (only these appear in main model picker)
+    var requestyFavoriteModelIDs: Set<String> {
+        get { _requestyFavoriteModelIDs }
+        set {
+            _requestyFavoriteModelIDs = newValue
+            SettingsStore.shared.set(Settings.AI.requestyFavorites, Array(newValue))
+            Self.logger.debug("Saved \(newValue.count) Requesty favorites")
+        }
+    }
+
+    /// Add a model to Requesty favorites
+    func addRequestyFavorite(_ modelID: String) {
+        _requestyFavoriteModelIDs.insert(modelID)
+        SettingsStore.shared.set(Settings.AI.requestyFavorites, Array(_requestyFavoriteModelIDs))
+        Self.logger.debug("Added Requesty favorite: \(modelID)")
+    }
+
+    /// Remove a model from Requesty favorites
+    func removeRequestyFavorite(_ modelID: String) {
+        _requestyFavoriteModelIDs.remove(modelID)
+        SettingsStore.shared.set(Settings.AI.requestyFavorites, Array(_requestyFavoriteModelIDs))
+        Self.logger.debug("Removed Requesty favorite: \(modelID)")
+    }
+
+    /// Check if a model is in Requesty favorites
+    func isRequestyFavorite(_ modelID: String) -> Bool {
+        _requestyFavoriteModelIDs.contains(modelID)
+    }
+
+    /// Get favorite models filtered from discovered models
+    var requestyFavoriteModels: [AIProviderModel] {
+        _requestyDiscoveredModels.filter { _requestyFavoriteModelIDs.contains($0.id) }
+    }
+
+    // MARK: - Requesty Discovered Models
+
+    /// Full catalog of discovered Requesty models
+    var requestyDiscoveredModels: [AIProviderModel] {
+        get { _requestyDiscoveredModels }
+        set {
+            _requestyDiscoveredModels = newValue
+            if let data = try? JSONEncoder().encode(newValue) {
+                UserDefaults.standard.set(data, forKey: requestyModelsKey)
+                Self.logger.debug("Saved \(newValue.count) discovered Requesty models")
+            }
+        }
+    }
+
+    /// Update discovered models from API response
+    func updateRequestyDiscoveredModels(_ models: [AIProviderModel]) {
+        requestyDiscoveredModels = models
+    }
+
+    /// Find a Requesty model by ID
+    func findRequestyModel(id: String) -> AIProviderModel? {
+        _requestyDiscoveredModels.first { $0.id == id }
+    }
+
+    /// Get unique provider slugs from discovered models (for filtering UI)
+    var requestyProviderSlugs: [String] {
+        let slugs = Set(_requestyDiscoveredModels.compactMap { AIProviderModel.requestyProviderSlug(for: $0.id) })
+        return slugs.sorted()
+    }
+
     // MARK: - Command Approval Mode
 
     /// Command approval mode for AI Agent
@@ -1333,7 +1494,8 @@ final class AICredentialsManager {
         AnthropicProvider.providerID: 0.4,
         BedrockProvider.providerID: 0.4,
         GeminiProvider.providerID: 0.4,
-        OpenRouterProvider.providerID: 0.4
+        OpenRouterProvider.providerID: 0.4,
+        RequestyProvider.providerID: 0.4
     ]
 
     /// Default temperature for custom providers
@@ -1420,7 +1582,7 @@ final class AICredentialsManager {
     // MARK: - Provider Factory
 
     /// Create the appropriate provider for any model ID.
-    /// Checks custom providers, then Anthropic, Google, OpenRouter, OpenAI.
+    /// Checks custom providers, then Anthropic, Google, OpenRouter, Requesty, OpenAI.
     func createProvider(forModelID modelID: String) -> (any AIProvider)? {
         // Check if this model belongs to any custom provider
         for provider in customProviders where provider.isEnabled {
@@ -1453,6 +1615,12 @@ final class AICredentialsManager {
         if openRouterDiscoveredModels.contains(where: { $0.id == modelID }) {
             guard let apiKey = loadOpenRouterAPIKey() else { return nil }
             return OpenRouterProvider(apiKey: apiKey, selectedModelID: modelID)
+        }
+
+        // Check if this is a Requesty model
+        if requestyDiscoveredModels.contains(where: { $0.id == modelID }) {
+            guard let apiKey = loadRequestyAPIKey() else { return nil }
+            return RequestyProvider(apiKey: apiKey, selectedModelID: modelID)
         }
 
         // In ChatGPT-subscription mode the subscription owns the OpenAI slot
