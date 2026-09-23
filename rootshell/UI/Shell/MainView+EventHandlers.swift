@@ -323,6 +323,9 @@ extension MainView {
         guard !didCleanUpWindow else { return }
         didCleanUpWindow = true
 
+        // Release this window's file manager connections; queued transfers keep their own.
+        fileManagerModel?.tearDown()
+
         // Release this window's overlay keyboard-preservation claim (no-op
         // unless it owns the latch) so surviving windows don't stay frozen
         // until the next keyboard event notices the dead owner.

@@ -140,6 +140,23 @@ final class RFSFTPDataSource: RFDataSource {
         }
     }
 
+    private var fileSystem: FileSystemEndpoint {
+        get throws { FileSystemEndpoint(backend: .sftp(try sftp)) }
+    }
+
+    /// Runs a tree copy while reporting cumulative bytes, as rf's callers expect.
+    private func copyTree(
+        _ source: String, to destination: String,
+        from sourceFS: FileSystemEndpoint, to destinationFS: FileSystemEndpoint,
+        onProgress: @escaping @Sendable (Int64) -> Void = { _ in }
+    ) async throws {
+        var total: Int64 = 0
+        try await FileTreeCopier.copyTree(source, to: destination, from: sourceFS, to: destinationFS) { delta in
+            total += delta
+            onProgress(total)
+        }
+    }
+
     // MARK: - Directory Listing
 
     func loadDirectory(at path: String) async throws -> [RFEntry] {
@@ -211,58 +228,21 @@ final class RFSFTPDataSource: RFDataSource {
         }
     }
 
+    /// Deletes a file, or a directory and its contents. A symlinked directory is
+    /// unlinked, never descended into.
     func delete(at path: String) async throws {
-        let attrs = try await sftp.getAttributes(at: path)
-        if SFTPOperations.isDirectory(attrs) {
-            try await deleteDirectoryRecursive(path: path)
-        } else {
-            try await sftp.remove(at: path)
-        }
-    }
-
-    /// Recursively delete a remote directory and all its contents.
-    private func deleteDirectoryRecursive(path: String) async throws {
-        let entries = try await SFTPOperations.listDirectoryEntries(sftp: sftp, path: path)
-        for entry in entries {
-            try Task.checkCancellation()
-            if entry.isDirectory {
-                try await deleteDirectoryRecursive(path: entry.path)
-            } else {
-                try await sftp.remove(at: entry.path)
-            }
-        }
-        try await sftp.rmdir(at: path)
+        try await fileSystem.removeRecursively(path)
     }
 
     func copyFile(sourcePath: String, destPath: String, force: Bool) async throws {
-        // Copying a file onto itself is a no-op. Bail before any I/O: the upload
+        // Copying a file onto itself is a no-op. Bail before any I/O: the copy
         // opens the destination with .truncate, so re-writing the source onto itself
-        // could corrupt the original if the upload fails midway.
+        // could corrupt the original if the copy fails midway.
         if sourcePath == destPath { return }
-        let attrs = try await sftp.getAttributes(at: sourcePath)
-        if SFTPOperations.isDirectory(attrs) {
-            try await copyDirectoryRecursive(sourcePath: sourcePath, destPath: destPath, force: force)
-        } else {
-            // SFTP has no server-side copy — download to temp then re-upload
-            let tempPath = (ensureTempDir() as NSString).appendingPathComponent(UUID().uuidString)
-            defer { try? FileManager.default.removeItem(atPath: tempPath) }
-
-            try await SFTPOperations.downloadFile(sftp: sftp, remotePath: sourcePath, localPath: tempPath)
-            if force { try? await sftp.remove(at: destPath) }
-            try await SFTPOperations.uploadFile(sftp: sftp, localPath: tempPath, remotePath: destPath)
-        }
-    }
-
-    /// Recursively copy a remote directory.
-    private func copyDirectoryRecursive(sourcePath: String, destPath: String, force: Bool) async throws {
-        if force { try? await delete(at: destPath) }
-        try await sftp.createDirectory(atPath: destPath)
-        let entries = try await SFTPOperations.listDirectoryEntries(sftp: sftp, path: sourcePath)
-        for entry in entries {
-            try Task.checkCancellation()
-            let dest = SFTPOperations.joinPath(destPath, entry.name)
-            try await copyFile(sourcePath: entry.path, destPath: dest, force: force)
-        }
+        let fs = try fileSystem
+        if force, await fs.exists(destPath) { try await fs.removeRecursively(destPath) }
+        // SFTP has no server-side copy; bytes stream through the app with no temp file.
+        try await copyTree(sourcePath, to: destPath, from: fs, to: fs)
     }
 
     func moveFile(sourcePath: String, destPath: String, force: Bool) async throws {
@@ -279,57 +259,20 @@ final class RFSFTPDataSource: RFDataSource {
 
     func downloadToLocal(remotePath: String, localPath: String,
                          onProgress: @escaping @Sendable (Int64) -> Void) async throws {
-        // Check if source is a directory
-        let attrs = try await sftp.getAttributes(at: remotePath)
-        if SFTPOperations.isDirectory(attrs) {
-            try await downloadDirectoryToLocal(remotePath: remotePath, localPath: localPath, onProgress: onProgress)
-        } else {
-            try await SFTPOperations.downloadFile(
-                sftp: sftp, remotePath: remotePath, localPath: localPath,
-                onProgress: onProgress
-            )
-        }
-    }
-
-    /// Recursively download a remote directory to a local path.
-    /// Does not use withIntermediateDirectories to avoid silently merging
-    /// into an existing directory — the caller handles force-delete first.
-    private func downloadDirectoryToLocal(remotePath: String, localPath: String,
-                                          onProgress: @escaping @Sendable (Int64) -> Void) async throws {
-        try FileManager.default.createDirectory(atPath: localPath, withIntermediateDirectories: false)
-        let entries = try await SFTPOperations.listDirectoryEntries(sftp: sftp, path: remotePath)
-        for entry in entries {
-            try Task.checkCancellation()
-            let dest = (localPath as NSString).appendingPathComponent(entry.name)
-            try await downloadToLocal(remotePath: entry.path, localPath: dest, onProgress: onProgress)
-        }
-    }
-
-    func uploadFromLocal(localPath: String, remotePath: String,
-                         onProgress: @escaping @Sendable (Int64) -> Void) async throws {
-        // Check if source is a directory
-        var isDir: ObjCBool = false
-        if FileManager.default.fileExists(atPath: localPath, isDirectory: &isDir), isDir.boolValue {
-            try await uploadDirectoryFromLocal(localPath: localPath, remotePath: remotePath, onProgress: onProgress)
-            return
-        }
-        try await SFTPOperations.uploadFile(
-            sftp: sftp, localPath: localPath, remotePath: remotePath,
+        try await copyTree(
+            remotePath, to: localPath,
+            from: fileSystem, to: FileSystemEndpoint(backend: .local(.current())),
             onProgress: onProgress
         )
     }
 
-    /// Recursively upload a local directory to a remote path.
-    private func uploadDirectoryFromLocal(localPath: String, remotePath: String,
-                                          onProgress: @escaping @Sendable (Int64) -> Void) async throws {
-        try await sftp.createDirectory(atPath: remotePath)
-        let contents = try FileManager.default.contentsOfDirectory(atPath: localPath)
-        for name in contents {
-            try Task.checkCancellation()
-            let src = (localPath as NSString).appendingPathComponent(name)
-            let dest = SFTPOperations.joinPath(remotePath, name)
-            try await uploadFromLocal(localPath: src, remotePath: dest, onProgress: onProgress)
-        }
+    func uploadFromLocal(localPath: String, remotePath: String,
+                         onProgress: @escaping @Sendable (Int64) -> Void) async throws {
+        try await copyTree(
+            localPath, to: remotePath,
+            from: FileSystemEndpoint(backend: .local(.current())), to: fileSystem,
+            onProgress: onProgress
+        )
     }
 
     // MARK: - Path Utilities
