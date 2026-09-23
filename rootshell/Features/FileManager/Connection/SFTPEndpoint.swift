@@ -46,6 +46,25 @@ enum SFTPEndpoint: Hashable {
         }
     }
 
+    /// The server config behind a remote endpoint.
+    var sshConfig: SSHConfig? {
+        switch self {
+        case .local: nil
+        case .profile(let id): ConnectionProfileManager.shared.profile(for: id)?.sshConfig
+        case .pane(let source): source.fallbackConfig.underlyingSSHConfig
+        }
+    }
+
+    /// True when both endpoints reach the same files: this device, or the same
+    /// server account through any route (a borrowed pane and its profile, say).
+    /// Destructive steps must use this, never `==`.
+    func sharesFileSystem(with other: SFTPEndpoint) -> Bool {
+        if self == other { return true }
+        if isLocal || other.isLocal { return isLocal && other.isLocal }
+        guard let config = sshConfig, let otherConfig = other.sshConfig else { return false }
+        return config.reachesSameAccount(as: otherConfig)
+    }
+
     var displayName: String {
         switch self {
         case .local:

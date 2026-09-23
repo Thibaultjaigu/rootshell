@@ -95,7 +95,11 @@ final class FileManagerModel {
     var activePane: FilePaneModel { pane(activeSide) }
     var otherPane: FilePaneModel { pane(activeSide.other) }
 
+    /// Moves the keyboard into the active pane's filter field. Only with a hardware
+    /// keyboard: without one, focusing would raise the on-screen keyboard and
+    /// cover much of the listing, so touch users tap the field when they want it.
     func requestFocus() {
+        guard KeyboardTracker.shared.isHardwareKeyboard else { return }
         focusRequestID += 1
     }
 
@@ -108,7 +112,7 @@ final class FileManagerModel {
         guard let source else { return }
         originPane = source
         let endpoint: SFTPEndpoint = source.fallbackConfig.underlyingSSHConfig == nil ? .local : .pane(source)
-        if let existing = [left, right].first(where: { showsSameHost($0.endpoint, endpoint) }) {
+        if let existing = [left, right].first(where: { $0.endpoint.sharesFileSystem(with: endpoint) }) {
             activeSide = existing.id
             return
         }
@@ -117,12 +121,6 @@ final class FileManagerModel {
         activeSide = side
     }
 
-    private func showsSameHost(_ a: SFTPEndpoint, _ b: SFTPEndpoint) -> Bool {
-        if a == b { return true }
-        if a.isLocal && b.isLocal { return true }
-        guard let profileA = a.profileID, let profileB = b.profileID else { return false }
-        return profileA == profileB
-    }
 
     // MARK: - Commands
 
@@ -315,9 +313,10 @@ final class FileManagerModel {
 
     private func refreshPanes(affectedBy job: TransferJob) {
         for pane in [left, right] where !pane.path.isEmpty {
-            let touchesSource = pane.endpoint == job.source
+            let touchesSource = pane.endpoint.sharesFileSystem(with: job.source)
                 && job.sourcePaths.contains { FileTransferLogic.parent(of: $0) == pane.path || $0 == pane.path }
-            let touchesDestination = pane.endpoint == job.destination && job.destinationDirectory == pane.path
+            let touchesDestination = job.destination.map(pane.endpoint.sharesFileSystem) == true
+                && job.destinationDirectory == pane.path
             if touchesSource || touchesDestination { pane.refresh() }
         }
     }

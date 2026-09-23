@@ -80,6 +80,7 @@ enum FileTreeCopier {
         preserveAttributes: Bool,
         onBytes: (Int64) -> Void
     ) async throws {
+        try await removeSymlink(at: item.destination, on: destination)
         switch item.kind {
         case .directory:
             if !(await destination.exists(item.destination)) {
@@ -122,29 +123,44 @@ enum FileTreeCopier {
         if preserveAttributes { await applyDirectoryModes(items, on: destination) }
     }
 
+    /// A symlink already at a destination is replaced, never written or descended
+    /// through, so a merge can't redirect data outside the target folder.
+    private static func removeSymlink(at path: String, on destination: FileSystemEndpoint) async throws {
+        guard let existing = try? await destination.info(path, followLinks: false), existing.isSymlink else { return }
+        try await destination.removeFile(path)
+    }
+
     private static func copyFile(_ item: Item, from source: FileSystemEndpoint, to destination: FileSystemEndpoint, onBytes: (Int64) -> Void) async throws {
         let reader = try await source.openReader(item.source)
         let writer: any ChunkWriter
         do {
             writer = try await destination.openWriter(item.destination)
         } catch {
-            await reader.close()
+            try? await reader.close()
             throw error
         }
         var counted: Int64 = 0
+        var failure: Error?
         do {
             try await PipelinedTransfer.copy(from: reader, to: writer, size: item.size > 0 ? UInt64(item.size) : nil) { total in
                 onBytes(total - counted)
                 counted = total
             }
-            await reader.close()
+        } catch {
+            failure = error
+        }
+        try? await reader.close()
+        // The item only counts as copied once the destination accepts the close.
+        do {
             try await writer.close()
         } catch {
-            await reader.close()
-            try? await writer.close()
+            failure = failure ?? error
+        }
+        if let failure {
+            // Never leave a truncated file behind or count its bytes.
             onBytes(-counted)
             try? await destination.removeFile(item.destination)
-            throw error
+            throw failure
         }
     }
 }

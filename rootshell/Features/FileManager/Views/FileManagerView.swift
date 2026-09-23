@@ -89,7 +89,7 @@ struct FileManagerView: View {
         .onAppear(perform: appeared)
         .onChange(of: manager.sheet == nil) { _, dismissed in
             // Hand the keyboard back to the list after any sheet closes.
-            if dismissed, KeyboardTracker.shared.isHardwareKeyboard { manager.requestFocus() }
+            if dismissed { manager.requestFocus() }
         }
     }
 
@@ -199,7 +199,7 @@ struct FileManagerView: View {
                 let pane = manager.pane(side)
                 Button {
                     manager.activeSide = side
-                    if KeyboardTracker.shared.isHardwareKeyboard { manager.requestFocus() }
+                    manager.requestFocus()
                 } label: {
                     HStack(spacing: 4) {
                         Text(side == .left ? "A" : "B").font(.caption2.weight(.bold)).foregroundStyle(.secondary)

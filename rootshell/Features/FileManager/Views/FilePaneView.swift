@@ -137,6 +137,8 @@ struct FilePaneView: View {
                 onEscape: handleEscape,
                 onSubmit: {
                     arrowRepeat.stop()
+                    // On touch, Return just closes the keyboard and keeps the filter.
+                    guard hasHardwareKeyboard else { return dismissSoftwareKeyboard() }
                     if !manager.queueFocused { manager.openCursor() }
                 },
                 onFocusChange: { focused in
@@ -300,6 +302,8 @@ struct FilePaneView: View {
                 .padding(.horizontal, 6)
                 .padding(.vertical, 4)
             }
+            // With a hardware keyboard the field must keep focus while the list scrolls.
+            .scrollDismissesKeyboard(hasHardwareKeyboard ? .never : .immediately)
             .onChange(of: pane.selection.cursor) { _, cursor in
                 guard let cursor else { return }
                 proxy.scrollTo(cursor)
@@ -358,9 +362,17 @@ struct FilePaneView: View {
         pane.selection.contains(entry.path) ? pane.actionEntries : [entry]
     }
 
+    /// Touch has no Esc, so the filter gives up the on-screen keyboard on
+    /// Return, on a row tap, and when the list scrolls.
+    private func dismissSoftwareKeyboard() {
+        guard !hasHardwareKeyboard else { return }
+        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+    }
+
     private func tap(_ entry: RFEntry) {
         manager.activeSide = pane.id
-        if hasHardwareKeyboard { manager.requestFocus() }
+        manager.requestFocus()
+        dismissSoftwareKeyboard()
         if isSelecting {
             pane.selection.toggle(entry.path)
             return

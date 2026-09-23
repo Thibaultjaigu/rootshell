@@ -33,6 +33,7 @@ final class FileTransferCenter {
     @ObservationIgnored private var conflictContinuation: CheckedContinuation<(TransferConflictResolution, Bool)?, Never>?
     @ObservationIgnored private var finishedObservers: [UUID: AsyncStream<TransferJob>.Continuation] = [:]
     @ObservationIgnored private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
+    @ObservationIgnored private var heldClaims: [UUID: TransferPathClaim] = [:]
 
     private init() {}
 
@@ -151,11 +152,15 @@ final class FileTransferCenter {
 
     // MARK: - Scheduling
 
+    /// Starts queued jobs up to the limit. A job whose paths overlap a running job's
+    /// writes waits, so it plans against the finished result and its conflicts are
+    /// asked about instead of two jobs truncating the same file.
     private func startQueuedJobs() {
         let limit = max(1, SettingsStore.shared.value(Settings.Transfer.fileManagerConcurrentJobs))
-        var running = jobs.filter(\.isActive).count
-        for job in jobs where job.state == .queued && running < limit {
-            running += 1
+        var active = jobs.filter(\.isActive)
+        for job in jobs where job.state == .queued && active.count < limit {
+            guard !active.contains(where: { Self.jobsConflict($0, job) }) else { continue }
+            active.append(job)
             job.setState(.preparing)
             let prompts = prompts[job.id] ?? FileManagerPrompts()
             job.task = Task { [weak self] in
@@ -166,8 +171,27 @@ final class FileTransferCenter {
         updateBackgroundTask()
     }
 
+    /// Cheap pre-check on the paths as written; `acquirePaths` then repeats it on
+    /// real paths, which also catches symlinked aliases.
+    private static func jobsConflict(_ a: TransferJob, _ b: TransferJob) -> Bool {
+        TransferPathClaim(job: a).conflicts(with: TransferPathClaim(job: b))
+    }
+
+    // MARK: - Path locks
+
+    /// Waits until no other running job holds an overlapping claim, then holds
+    /// `claim` until the job finishes. Claims are on real paths, so two routes to
+    /// one folder (an alias and its target) still serialize.
+    fileprivate func acquirePaths(_ claim: TransferPathClaim, for job: TransferJob) async throws {
+        while heldClaims.contains(where: { id, held in id != job.id && held.conflicts(with: claim) }) {
+            try await Task.sleep(for: .milliseconds(200))
+        }
+        heldClaims[job.id] = claim
+    }
+
     private func finish(_ job: TransferJob) {
         job.task = nil
+        heldClaims[job.id] = nil
         for observer in finishedObservers.values { observer.yield(job) }
         Self.logger.info("Transfer \(job.id, privacy: .public) finished: \(String(describing: job.state), privacy: .public)")
         startQueuedJobs()
@@ -184,6 +208,50 @@ final class FileTransferCenter {
         } else if !hasActiveJobs, backgroundTask != .invalid {
             UIApplication.shared.endBackgroundTask(backgroundTask)
             backgroundTask = .invalid
+        }
+    }
+}
+
+// MARK: - Path claims
+
+/// The paths a job reads and writes. Two jobs conflict when one writes where the
+/// other reads or writes, on the same filesystem, including beneath a folder.
+fileprivate struct TransferPathClaim {
+    struct Root {
+        let endpoint: SFTPEndpoint
+        let path: String
+    }
+
+    let writes: [Root]
+    let reads: [Root]
+
+    /// From the paths as the user chose them.
+    init(job: TransferJob) {
+        self.init(job: job, destinationDirectory: job.destinationDirectory, sources: job.sourcePaths)
+    }
+
+    /// Moves, deletes and permission changes also write their sources.
+    init(job: TransferJob, destinationDirectory: String?, sources: [String]) {
+        let sourceRoots = sources.map { Root(endpoint: job.source, path: $0) }
+        var writes: [Root] = []
+        if let destination = job.destination, let destinationDirectory {
+            writes.append(Root(endpoint: destination, path: destinationDirectory))
+        }
+        if job.operation != .copy { writes += sourceRoots }
+        self.writes = writes
+        reads = sourceRoots
+    }
+
+    func conflicts(with other: TransferPathClaim) -> Bool {
+        Self.overlaps(writes, other.writes + other.reads) || Self.overlaps(other.writes, writes + reads)
+    }
+
+    private static func overlaps(_ writes: [Root], _ touched: [Root]) -> Bool {
+        writes.contains { write in
+            touched.contains { other in
+                write.endpoint.sharesFileSystem(with: other.endpoint)
+                    && FileTransferLogic.pathsOverlap(write.path, other.path)
+            }
         }
     }
 }
@@ -217,15 +285,25 @@ private struct TransferExecutor {
 
         do {
             let sourceFS = try await pool.fileSystem(for: job.source, purpose: .transfer, prompts: prompts)
+            let sources = await realSources(on: sourceFS)
+            let sourceClaims = sources.values.flatMap { [$0.location, $0.followed] }
             switch job.operation {
             case .delete:
+                try await center?.acquirePaths(TransferPathClaim(job: job, destinationDirectory: nil, sources: sourceClaims), for: job)
                 try await runPerPath(sourceFS) { try await sourceFS.removeRecursively($0) }
             case .setPermissions(let mode):
+                try await center?.acquirePaths(TransferPathClaim(job: job, destinationDirectory: nil, sources: sourceClaims), for: job)
                 try await runPerPath(sourceFS) { try await sourceFS.setPermissions($0, mode: mode) }
             case .copy, .move:
                 guard let destination = job.destination, let directory = job.destinationDirectory else { return }
                 let destinationFS = try await pool.fileSystem(for: destination, purpose: .transfer, prompts: prompts)
-                try await runCopy(from: sourceFS, to: destinationFS, directory: directory)
+                let realDirectory = (try? await destinationFS.realPath(directory)) ?? directory
+                // Plan only once no other job can write here: an existence check made
+                // before this point could be stale by the time we open the file.
+                try await center?.acquirePaths(
+                    TransferPathClaim(job: job, destinationDirectory: realDirectory, sources: sourceClaims), for: job
+                )
+                try await runCopy(from: sourceFS, to: destinationFS, directory: directory, realDirectory: realDirectory, sources: sources)
             }
             try Task.checkCancellation()
             job.setState(job.errors.isEmpty ? .completed : .failed(failureSummary))
@@ -236,6 +314,24 @@ private struct TransferExecutor {
         } catch {
             job.setState(.failed(error.localizedDescription))
         }
+    }
+
+    /// Where each selected path really lives.
+    private struct RealSource {
+        /// The item's own location; for a link, where the link sits.
+        let location: String
+        /// Fully dereferenced; what a copy of a link actually reads.
+        let followed: String
+    }
+
+    private func realSources(on fs: FileSystemEndpoint) async -> [String: RealSource] {
+        var result: [String: RealSource] = [:]
+        for path in job.sourcePaths {
+            let location = (try? await fs.realLocation(of: path)) ?? path
+            let followed = (try? await fs.realPath(path)) ?? location
+            result[path] = RealSource(location: location, followed: followed)
+        }
+        return result
     }
 
     private var failureSummary: String {
@@ -263,19 +359,32 @@ private struct TransferExecutor {
 
     // MARK: - Copy and move
 
-    private func runCopy(from sourceFS: FileSystemEndpoint, to destinationFS: FileSystemEndpoint, directory: String) async throws {
-        let sameEndpoint = job.source == job.destination
-        var existingNames: Set<String>?
+    /// `realDirectory` and `sources` are resolved real paths: same-file and ancestor
+    /// checks use them, so neither a symlinked folder in a pane's path nor a selected
+    /// symlink can disguise the source. Both the link and its target count.
+    private func runCopy(
+        from sourceFS: FileSystemEndpoint, to destinationFS: FileSystemEndpoint,
+        directory: String, realDirectory: String, sources: [String: RealSource]
+    ) async throws {
+        // Identity, not enum equality: a borrowed pane and its profile are one filesystem.
+        let sameFileSystem = job.destination.map(job.source.sharesFileSystem) == true
+        var namesOnDisk: Set<String>?
+        var names = TransferNamePlanner(incomingNames: job.sourcePaths.map(FileTransferLogic.lastComponent))
         var roots: [Root] = []
 
         for path in job.sourcePaths {
             try Task.checkCancellation()
             let name = FileTransferLogic.lastComponent(of: path)
             var target = FileTransferLogic.join(directory, name)
+            let real = sources[path] ?? RealSource(location: path, followed: path)
+            let realTarget = FileTransferLogic.join(realDirectory, name)
+            let realSourcePaths = [real.location, real.followed]
+            // The destination is the item itself, or what a selected link points at.
+            let targetIsSource = sameFileSystem && realSourcePaths.contains(realTarget)
 
-            if sameEndpoint {
-                if job.operation == .move, target == path { continue }
-                if FileTransferLogic.isSameOrDescendant(directory, of: path),
+            if sameFileSystem {
+                if job.operation == .move, real.location == realTarget { continue }
+                if realSourcePaths.contains(where: { FileTransferLogic.isSameOrDescendant(realDirectory, of: $0) }),
                    (try? await sourceFS.info(path))?.isDirectory == true {
                     job.recordError(path: path, message: String(localized: "A folder can't be copied into itself.", comment: "File transfer error"))
                     continue
@@ -283,12 +392,12 @@ private struct TransferExecutor {
             }
 
             var replace = false
-            if target == path && sameEndpoint {
-                // Duplicating in place always keeps both.
-                target = try await keepBothTarget(name, in: directory, fs: destinationFS, cache: &existingNames)
+            if targetIsSource || names.isClaimed(name) {
+                // Duplicating in place, or a second item with the same name: keep both.
+                target = try await keepBothTarget(name, in: directory, fs: destinationFS, onDisk: &namesOnDisk, names: &names)
             } else if await destinationFS.exists(target) {
                 let sourceIsDirectory = (try? await sourceFS.info(path))?.isDirectory ?? false
-                let targetIsDirectory = (try? await destinationFS.info(target))?.isDirectory ?? false
+                let targetIsDirectory = (try? await destinationFS.info(target, followLinks: false))?.isDirectory ?? false
                 guard let resolution = try await resolveConflict(name: name, directory: directory, isDirectory: sourceIsDirectory && targetIsDirectory) else {
                     continue
                 }
@@ -296,15 +405,21 @@ private struct TransferExecutor {
                 case .skip:
                     continue
                 case .keepBoth:
-                    target = try await keepBothTarget(name, in: directory, fs: destinationFS, cache: &existingNames)
-                case .replace:
-                    replace = true
-                case .merge:
-                    replace = !(sourceIsDirectory && targetIsDirectory)
+                    target = try await keepBothTarget(name, in: directory, fs: destinationFS, onDisk: &namesOnDisk, names: &names)
+                case .replace, .merge:
+                    // Clearing a destination that is, or contains, the source would delete the source.
+                    if sameFileSystem, realSourcePaths.contains(where: { FileTransferLogic.isSameOrDescendant($0, of: realTarget) }) {
+                        job.recordError(path: path, message: String(localized: "“\(name)” can't replace a folder that contains it.", comment: "File transfer error; argument is a file name"))
+                        continue
+                    }
+                    replace = resolution == .replace || !(sourceIsDirectory && targetIsDirectory)
+                    names.claim(name)
                 }
+            } else {
+                names.claim(name)
             }
 
-            if sameEndpoint, job.operation == .move {
+            if sameFileSystem, job.operation == .move {
                 do {
                     if replace { try await destinationFS.removeRecursively(target) }
                     try await sourceFS.rename(path, to: target)
@@ -380,10 +495,11 @@ private struct TransferExecutor {
         return resolution
     }
 
-    private func keepBothTarget(_ name: String, in directory: String, fs: FileSystemEndpoint, cache: inout Set<String>?) async throws -> String {
-        if cache == nil { cache = Set(try await fs.list(directory).map(\.name)) }
-        let unique = FileTransferLogic.keepBothName(for: name, existing: cache ?? [])
-        cache?.insert(unique)
-        return FileTransferLogic.join(directory, unique)
+    private func keepBothTarget(
+        _ name: String, in directory: String, fs: FileSystemEndpoint,
+        onDisk: inout Set<String>?, names: inout TransferNamePlanner
+    ) async throws -> String {
+        if onDisk == nil { onDisk = Set(try await fs.list(directory).map(\.name)) }
+        return FileTransferLogic.join(directory, names.claimKeepBothName(for: name, existingOnDisk: onDisk ?? []))
     }
 }

@@ -38,6 +38,37 @@ final class FileManagerLogicTests: XCTestCase {
         XCTAssertEqual(FileTransferLogic.keepBothName(for: ".config.yml", existing: []), ".config 2.yml")
     }
 
+    func testKeepBothSkipsNamesOtherItemsInTheJobWillTake() {
+        // Destination holds a.txt; the job brings a.txt and "a 2.txt".
+        var names = TransferNamePlanner(incomingNames: ["a.txt", "a 2.txt"])
+        XCTAssertEqual(names.claimKeepBothName(for: "a.txt", existingOnDisk: ["a.txt"]), "a 3.txt")
+        XCTAssertFalse(names.isClaimed("a 2.txt"))
+        names.claim("a 2.txt")
+        XCTAssertEqual(names.claimKeepBothName(for: "a.txt", existingOnDisk: ["a.txt"]), "a 4.txt")
+    }
+
+    func testDuplicateIncomingNamesAreClaimed() {
+        var names = TransferNamePlanner(incomingNames: ["x", "x"])
+        XCTAssertFalse(names.isClaimed("x"))
+        names.claim("x")
+        XCTAssertTrue(names.isClaimed("x"))
+        XCTAssertEqual(names.claimKeepBothName(for: "x", existingOnDisk: []), "x 2")
+    }
+
+    func testPathsOverlapEitherDirection() {
+        XCTAssertTrue(FileTransferLogic.pathsOverlap("/d", "/d"))
+        XCTAssertTrue(FileTransferLogic.pathsOverlap("/d", "/d/x"))
+        XCTAssertTrue(FileTransferLogic.pathsOverlap("/d/x", "/d"))
+        XCTAssertFalse(FileTransferLogic.pathsOverlap("/d/x", "/d/y"))
+        XCTAssertFalse(FileTransferLogic.pathsOverlap("/d", "/dx"))
+    }
+
+    func testReplacingAnAncestorIsDetected() {
+        // Moving /a/b/b into /a targets /a/b, which contains the source.
+        XCTAssertTrue(FileTransferLogic.isSameOrDescendant("/a/b/b", of: "/a/b"))
+        XCTAssertFalse(FileTransferLogic.isSameOrDescendant("/a/bb", of: "/a/b"))
+    }
+
     // MARK: - Rate and throttle
 
     func testRateMeterSmoothsAndEstimates() {

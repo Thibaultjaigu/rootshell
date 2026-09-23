@@ -41,7 +41,7 @@ nonisolated struct LocalPathResolver: Sendable {
         #endif
     }
 
-    /// The path to hand to the filesystem for `path`.
+    /// The path to hand to the filesystem for `path`, following a bookmark link.
     func resolve(_ path: String) -> String {
         guard !mappings.isEmpty else { return path }
         let standardized = (path as NSString).standardizingPath
@@ -52,6 +52,16 @@ nonisolated struct LocalPathResolver: Sendable {
             }
         }
         return path
+    }
+
+    /// Resolves only the parent, so an operation on the item itself (lstat,
+    /// unlink, rename, readlink) acts on a bookmark link, never its target.
+    func resolveParent(_ path: String) -> String {
+        guard !mappings.isEmpty else { return path }
+        let standardized = (path as NSString).standardizingPath
+        let parent = (standardized as NSString).deletingLastPathComponent
+        guard !parent.isEmpty, parent != standardized else { return path }
+        return (resolve(parent) as NSString).appendingPathComponent((standardized as NSString).lastPathComponent)
     }
 }
 
@@ -91,7 +101,8 @@ nonisolated struct FileSystemEndpoint: Sendable {
     func info(_ path: String, followLinks: Bool = true) async throws -> ItemInfo {
         switch backend {
         case .local(let resolver):
-            return try await Self.localInfo(resolver.resolve(path), followLinks: followLinks)
+            let resolved = followLinks ? resolver.resolve(path) : resolver.resolveParent(path)
+            return try await Self.localInfo(resolved, followLinks: followLinks)
         case .sftp(let sftp):
             do {
                 let attrs = followLinks
@@ -142,6 +153,24 @@ nonisolated struct FileSystemEndpoint: Sendable {
         }
     }
 
+    /// `path` with every symlink resolved, for deciding whether two paths name the
+    /// same file. Only for comparison: operations keep the path the user sees.
+    func realPath(_ path: String) async throws -> String {
+        switch backend {
+        case .local(let resolver):
+            return try await Self.localRealPath(resolver.resolve(path))
+        case .sftp(let sftp):
+            return try await mapped(path) { try await sftp.getRealPath(atPath: path) }
+        }
+    }
+
+    /// `path`'s parent resolved to its real location, with the final name kept,
+    /// so a symlink being moved is still compared as the link itself.
+    func realLocation(of path: String) async throws -> String {
+        let parent = FileTransferLogic.parent(of: path)
+        return FileTransferLogic.join(try await realPath(parent), FileTransferLogic.lastComponent(of: path))
+    }
+
     func exists(_ path: String) async -> Bool {
         (try? await info(path, followLinks: false)) != nil
     }
@@ -149,7 +178,7 @@ nonisolated struct FileSystemEndpoint: Sendable {
     func readLink(_ path: String) async throws -> String {
         switch backend {
         case .local(let resolver):
-            return try FileManager.default.destinationOfSymbolicLink(atPath: resolver.resolve(path))
+            return try FileManager.default.destinationOfSymbolicLink(atPath: resolver.resolveParent(path))
         case .sftp(let sftp):
             return try await mapped(path) { try await sftp.readLink(at: path) }
         }
@@ -160,7 +189,7 @@ nonisolated struct FileSystemEndpoint: Sendable {
     func makeDirectory(_ path: String) async throws {
         switch backend {
         case .local(let resolver):
-            try await Self.onDisk { try FileManager.default.createDirectory(atPath: resolver.resolve(path), withIntermediateDirectories: false) }
+            try await Self.onDisk { try FileManager.default.createDirectory(atPath: resolver.resolveParent(path), withIntermediateDirectories: false) }
         case .sftp(let sftp):
             try await mapped(path) { try await sftp.createDirectory(atPath: path) }
         }
@@ -175,7 +204,9 @@ nonisolated struct FileSystemEndpoint: Sendable {
     func removeFile(_ path: String) async throws {
         switch backend {
         case .local(let resolver):
-            try await Self.onDisk { try FileManager.default.removeItem(atPath: resolver.resolve(path)) }
+            try await Self.onDisk {
+                guard unlink(resolver.resolveParent(path)) == 0 else { throw POSIXError.current }
+            }
         case .sftp(let sftp):
             try await mapped(path) { try await sftp.remove(at: path) }
         }
@@ -186,7 +217,7 @@ nonisolated struct FileSystemEndpoint: Sendable {
         switch backend {
         case .local(let resolver):
             try await Self.onDisk {
-                guard rmdir(resolver.resolve(path)) == 0 else { throw POSIXError.current }
+                guard rmdir(resolver.resolveParent(path)) == 0 else { throw POSIXError.current }
             }
         case .sftp(let sftp):
             try await mapped(path) { try await sftp.rmdir(at: path) }
@@ -215,7 +246,9 @@ nonisolated struct FileSystemEndpoint: Sendable {
     func rename(_ from: String, to: String) async throws {
         switch backend {
         case .local(let resolver):
-            try await Self.onDisk { try FileManager.default.moveItem(atPath: resolver.resolve(from), toPath: resolver.resolve(to)) }
+            try await Self.onDisk {
+                guard Darwin.rename(resolver.resolveParent(from), resolver.resolveParent(to)) == 0 else { throw POSIXError.current }
+            }
         case .sftp(let sftp):
             try await mapped(from) { try await sftp.rename(at: from, to: to) }
         }
@@ -252,7 +285,7 @@ nonisolated struct FileSystemEndpoint: Sendable {
         switch backend {
         case .local(let resolver):
             try await Self.onDisk {
-                try FileManager.default.createSymbolicLink(atPath: resolver.resolve(linkPath), withDestinationPath: target)
+                try FileManager.default.createSymbolicLink(atPath: resolver.resolveParent(linkPath), withDestinationPath: target)
             }
         case .sftp(let sftp):
             try await mapped(linkPath) { try await sftp.createSymlink(linkPath: linkPath, targetPath: target) }
@@ -271,11 +304,12 @@ nonisolated struct FileSystemEndpoint: Sendable {
         }
     }
 
-    /// Creates or truncates `path` for writing.
+    /// Creates or truncates `path` for writing. A local symlink at `path` is refused,
+    /// never written through; callers unlink destination links first.
     func openWriter(_ path: String) async throws -> any ChunkWriter {
         switch backend {
         case .local(let resolver):
-            return try PipelinedTransfer.LocalFile.openForWriting(resolver.resolve(path))
+            return try PipelinedTransfer.LocalFile.openForWriting(resolver.resolveParent(path))
         case .sftp(let sftp):
             let file = try await mapped(path) {
                 try await sftp.openFile(filePath: path, flags: [.write, .create, .truncate])
@@ -307,6 +341,13 @@ nonisolated struct FileSystemEndpoint: Sendable {
     @concurrent
     private static func onDisk(_ body: @Sendable () throws -> Void) async throws {
         try body()
+    }
+
+    @concurrent
+    private static func localRealPath(_ path: String) async throws -> String {
+        guard let resolved = Darwin.realpath(path, nil) else { throw POSIXError.current }
+        defer { free(resolved) }
+        return String(cString: resolved)
     }
 
     @concurrent

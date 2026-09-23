@@ -51,6 +51,11 @@ nonisolated enum FileTransferLogic {
         candidate == directory || candidate.hasPrefix(directory.hasSuffix("/") ? directory : directory + "/")
     }
 
+    /// True when either path is the other or lies beneath it.
+    static func pathsOverlap(_ a: String, _ b: String) -> Bool {
+        isSameOrDescendant(a, of: b) || isSameOrDescendant(b, of: a)
+    }
+
     /// "name.ext" → "name 2.ext", skipping names in `existing`. Dotfiles keep their
     /// leading dot and multi-part extensions like ".tar.gz" stay attached.
     static func keepBothName(for name: String, existing: Set<String>) -> String {
@@ -76,6 +81,34 @@ nonisolated enum FileTransferLogic {
         let stem = parts.dropLast(extensionCount).joined(separator: ".")
         let suffix = "." + parts.suffix(extensionCount).joined(separator: ".")
         return (lead + stem, suffix)
+    }
+}
+
+/// Destination names for one job's items in one folder. Every name the job will
+/// create is reserved, so "Keep Both" never picks a name another item in the
+/// same job is about to take, and duplicate incoming names never overwrite.
+nonisolated struct TransferNamePlanner: Sendable {
+    private let incoming: Set<String>
+    private var claimed: Set<String> = []
+
+    init(incomingNames: [String]) {
+        incoming = Set(incomingNames)
+    }
+
+    /// True when an earlier item in this job already targets `name`.
+    func isClaimed(_ name: String) -> Bool {
+        claimed.contains(name)
+    }
+
+    mutating func claim(_ name: String) {
+        claimed.insert(name)
+    }
+
+    /// Claims a "name N" that is not on disk, not claimed, and not another incoming name.
+    mutating func claimKeepBothName(for name: String, existingOnDisk: Set<String>) -> String {
+        let unique = FileTransferLogic.keepBothName(for: name, existing: existingOnDisk.union(claimed).union(incoming))
+        claimed.insert(unique)
+        return unique
     }
 }
 

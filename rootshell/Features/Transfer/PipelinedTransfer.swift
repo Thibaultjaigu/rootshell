@@ -16,10 +16,11 @@ import os.log
 /// Positional reads from a file; `read` returns empty Data at EOF.
 nonisolated protocol ChunkReader: Sendable {
     func read(at offset: UInt64, length: UInt32) async throws -> Data
-    func close() async
+    func close() async throws
 }
 
 /// Positional writes to a file; writes at distinct offsets may run concurrently.
+/// A copy only succeeds once `close()` returns: servers may report write errors there.
 nonisolated protocol ChunkWriter: Sendable {
     func write(_ data: Data, at offset: UInt64) async throws
     func close() async throws
@@ -62,8 +63,8 @@ enum PipelinedTransfer {
             try await file.write(ByteBuffer(data: data), at: offset)
         }
 
-        func close() async {
-            try? await file.close()
+        func close() async throws {
+            try await file.close()
         }
     }
 
@@ -83,8 +84,9 @@ enum PipelinedTransfer {
             return LocalFile(descriptor: fd, ownsDescriptor: true)
         }
 
+        /// Refuses a symlink at `path` (O_NOFOLLOW) so a write can't land outside the destination.
         static func openForWriting(_ path: String) throws -> LocalFile {
-            let fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0o644)
+            let fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0o644)
             guard fd >= 0 else { throw LocalIOError(underlying: POSIXError.current) }
             return LocalFile(descriptor: fd, ownsDescriptor: true)
         }
@@ -112,8 +114,9 @@ enum PipelinedTransfer {
             }
         }
 
-        func close() async {
-            if ownsDescriptor { Darwin.close(descriptor) }
+        func close() async throws {
+            guard ownsDescriptor else { return }
+            guard Darwin.close(descriptor) == 0 else { throw LocalIOError(underlying: POSIXError.current) }
         }
     }
 

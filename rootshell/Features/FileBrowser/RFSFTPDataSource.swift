@@ -25,50 +25,10 @@ final class RFSFTPDataSource: RFDataSource {
 
     /// Whether `other` addresses the same server-side file scope, so an identical
     /// absolute path on both is literally the same file. Used only to suppress a
-    /// destructive paste onto the source itself, so it errs conservative: it must
-    /// be *certain* the two are the same before short-circuiting.
-    ///
-    /// - Account scope matters: chrooted / user-scoped servers map the same path to
-    ///   different files per user, so `username` (plus `port`/`jumpHost`) must match.
-    /// - The same server is often reached under different host strings — letter case
-    ///   (DNS is case-insensitive) or a `.local` name vs. its resolved/cached IP —
-    ///   so we match on any shared host candidate rather than the raw string.
-    ///
-    /// Limitation: arbitrary aliases that share no host/IP candidate (e.g. a CNAME
-    /// or `/etc/hosts` entry with a wholly different name and no cached IP) can't be
-    /// proven equal statically and are treated as different.
+    /// destructive paste onto the source itself.
     func isSameLocation(as other: any RFDataSource) -> Bool {
         guard let other = other as? RFSFTPDataSource else { return false }
-        guard config.username == other.config.username,
-              config.port == other.config.port,
-              Self.sameJumpLocation(config.jumpHost, other.config.jumpHost) else { return false }
-        return !Self.hostCandidates(config).isDisjoint(with: Self.hostCandidates(other.config))
-    }
-
-    /// Lower-cased host plus any cached IP — the set of strings that may name this
-    /// server. A non-empty intersection means the same machine.
-    private static func hostCandidates(_ config: SSHConfig) -> Set<String> {
-        var set: Set<String> = [config.host.lowercased()]
-        if let ip = config.cachedIP, !ip.isEmpty { set.insert(ip.lowercased()) }
-        return set
-    }
-
-    /// Whether two routes traverse the same jump host *location*. Compares only the
-    /// location-defining fields (host/port/username) — auth details like authMethod,
-    /// fallback keys, and key-resolution hints don't change which server is reached,
-    /// so including them would wrongly split the same route into "different".
-    private static func sameJumpLocation(_ a: SSHConfig.JumpHostConfig?,
-                                         _ b: SSHConfig.JumpHostConfig?) -> Bool {
-        switch (a, b) {
-        case (nil, nil):
-            return true
-        case let (a?, b?):
-            return a.host.lowercased() == b.host.lowercased()
-                && a.port == b.port
-                && a.username == b.username
-        default:
-            return false
-        }
+        return config.reachesSameAccount(as: other.config)
     }
 
     let config: SSHConfig
